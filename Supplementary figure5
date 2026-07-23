@@ -1,0 +1,156 @@
+"""
+Supplementary Figure 5: Cross-fraction overlap of phosphopeptides (Phase 2).
+TRANSPARENT background, 600 DPI. 4 panels in 2x2 layout (A=10, B=5, C=2, D=1 mg).
+
+For each HILIC loading, the histogram shows the log2 intensity distribution of ALL
+phosphopeptides recovered in the phosphopeptide (PP) fraction, overlaid with the
+subset that is ALSO detected in the glycopeptide (GP) fraction. This tests whether
+the phosphopeptides that partition into the glycopeptide fraction are a low-intensity
+subpopulation. They are not: the overlap distribution has the same shape and centre
+as the full set, so cross-fraction partitioning is not intensity-driven.
+
+CORRECTED column selection (matching the latest Figure 4 script):
+  GP intensity columns are selected with str.startswith(prefix), which excludes the
+  FragPipe decoy columns 'REV<prefix>_*', and with 'MaxLFQ' excluded to avoid
+  including match-between-runs summary columns. The earlier version used a broad
+  'prefix in column' substring test that matched REV decoy columns (inflating the
+  10 mg overlap) and did not exclude MaxLFQ columns.
+
+Detection: intensity numeric and > 0. GP membership is evaluated at the stripped
+peptide sequence level; the histogram itself plots PP-fraction intensities.
+
+Data:
+    1150375-1150394_HILIC_beads-PP_A227_20260410_Peptide_Precursor_Report.csv  (PP, Spectronaut)
+    1150410-1150429_HILIC_beads_test_GP_A227_combined_modified_peptide.tsv     (GP, FragPipe)
+"""
+import os
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+
+PP_PATH = "/mnt/user-data/uploads/1150375-1150394_HILIC_beads-PP_A227_20260410_Peptide_Precursor_Report.csv"
+GP_PATH = "/mnt/user-data/uploads/1150410-1150429_HILIC_beads_test_GP_A227_combined_modified_peptide.tsv"
+OUTDIR = "/mnt/user-data/outputs"
+PANELDIR = "/home/claude/sf5_panels"
+os.makedirs(OUTDIR, exist_ok=True)
+os.makedirs(PANELDIR, exist_ok=True)
+
+DPI_PANEL = 600; DPI_ASSEMBLED = 600
+TRANSPARENT = True
+FIGSIZE = (3, 3)
+FS_LABEL, FS_TICK, FS_LEGEND = 10, 9, 6
+SAVE = dict(dpi=DPI_PANEL, transparent=TRANSPARENT, bbox_inches='tight')
+
+CONDITIONS = {
+    '10 mg': {'pp_pat': '_10-10-PP-', 'gp_pre': '10_10_GP'},
+    '5 mg':  {'pp_pat': '_10-5-PP-',  'gp_pre': '10_5_GP'},
+    '2 mg':  {'pp_pat': '_10-2-PP-',  'gp_pre': '10_2_GP'},
+    '1 mg':  {'pp_pat': '_10-1-PP-',  'gp_pre': '10_1_GP'},
+}
+PANEL_LETTERS = {'10 mg': 'A', '5 mg': 'B', '2 mg': 'C', '1 mg': 'D'}
+
+def detected_mask(s):
+    s = pd.to_numeric(s, errors='coerce')
+    return s.notna() & (s > 0)
+def style_ax(ax):
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5); spine.set_color('black')
+    ax.tick_params(width=1.5, length=4, labelsize=FS_TICK)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.set_axisbelow(True)
+    ax.set_facecolor('none')
+
+# ============================================================
+# Load
+# ============================================================
+print("Loading data...")
+pp = pd.read_csv(PP_PATH, low_memory=False)
+pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
+pp_phos = pp[pp['is_phospho']].copy()
+pp_quant_cols = [c for c in pp.columns if 'Label-Free Quant' in c]
+
+gp = pd.read_csv(GP_PATH, sep='\t', low_memory=False)
+gp['has_phospho'] = gp['Assigned Modifications'].str.contains(r'79\.9663', na=False)
+gp['has_glyco']   = gp['Assigned Modifications'].str.contains(r'N\(', na=False)
+gp_phos_only = gp[gp['has_phospho'] & ~gp['has_glyco']].copy()
+
+# CORRECTED: endswith(' Intensity'), exclude MaxLFQ and Spectral; select per condition
+# with startswith() to avoid matching REV<prefix> decoy columns.
+gp_int_cols = [c for c in gp.columns
+               if c.endswith(' Intensity') and 'MaxLFQ' not in c and 'Spectral' not in c]
+
+# ============================================================
+# Panels A-D
+# ============================================================
+panel_paths = []
+for cname, info in CONDITIONS.items():
+    # PP-fraction phosphopeptide intensities (all detected across reps)
+    pp_cols = [c for c in pp_quant_cols if info['pp_pat'] in c]
+    pp_log2 = []
+    pp_ids = set()
+    for col in pp_cols:
+        v = pd.to_numeric(pp_phos[col], errors='coerce')
+        det = v.notna() & (v > 0)
+        pp_log2.extend(np.log2(v[det].values))
+        pp_ids |= set(pp_phos.loc[det, 'PP.PIMID'].tolist())
+
+    # GP-fraction phosphopeptide sequences (corrected column selection)
+    gp_cols = [c for c in gp_int_cols if c.startswith(info['gp_pre'])]
+    gp_seqs = set()
+    for col in gp_cols:
+        v = pd.to_numeric(gp_phos_only[col], errors='coerce')
+        det = v.notna() & (v > 0)
+        gp_seqs |= set(gp_phos_only.loc[det, 'Peptide Sequence'].tolist())
+
+    # Overlap: PP phosphopeptides whose stripped sequence also appears in GP
+    overlap_mask = (pp_phos['PP.PIMID'].isin(pp_ids) &
+                    pp_phos['PEP.StrippedSequence'].isin(gp_seqs))
+    overlap_log2 = []
+    for col in pp_cols:
+        v = pd.to_numeric(pp_phos.loc[overlap_mask, col], errors='coerce')
+        det = v.notna() & (v > 0)
+        overlap_log2.extend(np.log2(v[det].values))
+
+    n_all = len(pp_ids)
+    n_overlap = len(set(pp_phos.loc[overlap_mask & pp_phos['PP.PIMID'].isin(pp_ids), 'PP.PIMID']))
+    print(f"  {cname}: n_all={n_all}, n_overlap={n_overlap} ({n_overlap/n_all*100:.1f}%)")
+
+    fig, ax = plt.subplots(figsize=FIGSIZE)
+    bins = np.arange(4, 16, 0.25)
+    ax.hist(pp_log2, bins=bins, color='#7FABD6', edgecolor='black', linewidth=0.5,
+            label=f'All phospho fraction (n={n_all})', alpha=0.85)
+    ax.hist(overlap_log2, bins=bins, color='#E8916D', edgecolor='black', linewidth=0.5,
+            label=f'Also in glyco fraction (n={n_overlap})', alpha=0.85)
+    ax.set_xlabel('Phosphopeptide intensity (log$_2$)', fontsize=FS_LABEL)
+    ax.set_ylabel('Count', fontsize=FS_LABEL)
+    ax.legend(loc='upper right', fontsize=FS_LEGEND, framealpha=0.95, edgecolor='black')
+    ax.set_xlim(4, 15.5)
+    ax.set_ylim(0, ax.get_ylim()[1] * 1.25)
+    style_ax(ax); plt.tight_layout()
+    p = f"{PANELDIR}/panel_{PANEL_LETTERS[cname].lower()}.png"
+    plt.savefig(p, **SAVE); plt.close()
+    panel_paths.append((p, PANEL_LETTERS[cname]))
+
+# ============================================================
+# Assemble (2x2) — transparent
+# ============================================================
+print("\nAssembling SuppFig 5...")
+fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+fig.patch.set_alpha(0.0)
+axes = axes.flatten()
+for ax, (path, letter) in zip(axes, panel_paths):
+    img = mpimg.imread(path)
+    ax.imshow(img); ax.axis('off')
+    ax.text(-0.08, 1.05, letter, transform=ax.transAxes,
+            fontsize=18, fontweight='bold', ha='left', va='bottom')
+plt.tight_layout(pad=0.5)
+out_path = f"{OUTDIR}/SuppFig5_cross_fraction_transparent.png"
+plt.savefig(out_path, dpi=DPI_ASSEMBLED, bbox_inches='tight', transparent=True)
+plt.close()
+print(f"Saved {out_path}")
