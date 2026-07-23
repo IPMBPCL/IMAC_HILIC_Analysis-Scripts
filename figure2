@@ -1,0 +1,258 @@
+"""
+Figure 2: IMAC-only frit comparison (PP / GF-A / GF-C / GF-F).
+Self-contained. 4 panels in 2x2 layout.
+
+MODIFICATIONS (this version):
+    - Panel C: bottom "n=xx" label replaced with median CV value
+    - Panel D: bottom "n=xx" label replaced with median peptide length value
+    - All panels saved with transparent background, DPI=600
+"""
+import os
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+
+# ============================================================
+# Configuration
+# ============================================================
+DATA_PATH = "/mnt/user-data/uploads/20260126_101628_Frit_vs_GF_PP_A227_20260126_Precursor_Report_20260126_150150.tsv"
+OUTDIR = "/mnt/user-data/outputs"
+os.makedirs(OUTDIR, exist_ok=True)
+
+DPI_PANEL = 600
+DPI_ASSEMBLED = 300
+FIGSIZE = (3, 3)
+FS_LABEL, FS_TICK, FS_LEGEND, FS_VALUE, FS_N = 10, 9, 6, 8, 6
+
+COLORS = ['#AADCFA', '#78A5C8', '#8CB9B9', '#C8D2E6']
+COLOR_MONO  = '#87CEFA'
+COLOR_MULTI = '#4682B4'
+
+CONDITIONS = {
+    'PP':   ['F1-5-PP', 'F2-6-PP', 'F3-7-PP', 'F4-8-PP'],
+    'GF-A': ['GF-A-1', 'GF-A-2', 'GF-A-3', 'GF-A-4'],
+    'GF-C': ['GF-C-1', 'GF-C-2', 'GF-C-3', 'GF-C-4'],
+    'GF-F': ['GF-F-1', 'GF-F-2', 'GF-F-3', 'GF-F-4'],
+}
+
+# ============================================================
+# Helpers
+# ============================================================
+def detected_mask(s):
+    s = pd.to_numeric(s, errors='coerce')
+    return s.notna() & (s > 0)
+
+def style_ax(ax):
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5); spine.set_color('black')
+    ax.tick_params(width=1.5, length=4, labelsize=FS_TICK)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.set_axisbelow(True)
+
+def cv_distribution(df, key_col, cond_cols, min_reps=3):
+    sub = df[[key_col] + list(cond_cols)].copy()
+    for c in cond_cols:
+        sub[c] = pd.to_numeric(sub[c], errors='coerce')
+    g = sub.groupby(key_col)[list(cond_cols)].max()
+    valid = g.where(g > 0)
+    keep = valid[valid.notna().sum(axis=1) >= min_reps]
+    means = keep.mean(axis=1, skipna=True); stds = keep.std(axis=1, skipna=True)
+    return (stds / means * 100).dropna().values
+
+# ============================================================
+# Load
+# ============================================================
+print("Loading data...")
+pp = pd.read_csv(DATA_PATH, sep='\t', low_memory=False)
+pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
+pp['n_phospho'] = pp['PP.PIMID'].str.count(r'\[Phospho \(STY\)\]')
+pp['length'] = pp['PEP.StrippedSequence'].str.len()
+pp_phos = pp[pp['is_phospho']].copy()
+quant_cols = [c for c in pp.columns if 'Label-Free Quant' in c]
+print(f"  PP rows={len(pp)}, phos rows={len(pp_phos)}, quant cols={len(quant_cols)}")
+
+x = np.arange(len(CONDITIONS)); width = 0.6
+
+# ============================================================
+# Panel A: Phospho stacked bar (mono / multi)  [UNCHANGED]
+# ============================================================
+print("\nPanel A: Phospho stacked bar")
+mono_per_rep = {c: [] for c in CONDITIONS}
+multi_per_rep = {c: [] for c in CONDITIONS}
+for cname, reps in CONDITIONS.items():
+    for r in reps:
+        col = next(c for c in quant_cols if r in c)
+        det = detected_mask(pp_phos[col])
+        sub = pp_phos[det].drop_duplicates('PP.PIMID')
+        mono_per_rep[cname].append((sub['n_phospho'] == 1).sum())
+        multi_per_rep[cname].append((sub['n_phospho'] > 1).sum())
+
+mono_means_a  = [np.mean(mono_per_rep[c])  for c in CONDITIONS]
+multi_means_a = [np.mean(multi_per_rep[c]) for c in CONDITIONS]
+total_means_a = [m + mu for m, mu in zip(mono_means_a, multi_means_a)]
+total_sds_a   = [np.std([mono_per_rep[c][i] + multi_per_rep[c][i]
+                         for i in range(len(mono_per_rep[c]))], ddof=1)
+                 for c in CONDITIONS]
+
+fig, ax = plt.subplots(figsize=FIGSIZE)
+b_multi = ax.bar(x, multi_means_a, width, color=COLOR_MULTI, edgecolor='black', linewidth=1.0)
+b_mono  = ax.bar(x, mono_means_a, width, bottom=multi_means_a, color=COLOR_MONO,
+                 edgecolor='black', linewidth=1.0)
+ax.errorbar(x, total_means_a, yerr=total_sds_a, fmt='none', ecolor='black',
+            capsize=3, capthick=1.0, linewidth=1.0)
+for i in range(len(CONDITIONS)):
+    if multi_means_a[i] > 200:
+        ax.text(i, multi_means_a[i] / 2, f'{multi_means_a[i]:.0f}',
+                ha='center', va='center', fontsize=7, fontweight='bold', color='white')
+    if mono_means_a[i] > 200:
+        ax.text(i, multi_means_a[i] + mono_means_a[i] / 2, f'{mono_means_a[i]:.0f}',
+                ha='center', va='center', fontsize=7, fontweight='bold', color='black')
+ax.set_xticks(x); ax.set_xticklabels(list(CONDITIONS.keys()), fontsize=FS_TICK)
+ax.set_xlabel('Frit material', fontsize=FS_LABEL)
+ax.set_ylabel('Number of phosphopeptides', fontsize=FS_LABEL)
+ax.set_ylim(0, 11000)
+ax.legend([b_mono, b_multi], ['Mono-phosphorylated', 'Multiply phosphorylated'],
+          loc='upper left', fontsize=FS_LEGEND, framealpha=0.95, edgecolor='black')
+style_ax(ax); plt.tight_layout()
+panel_a = f"{OUTDIR}/figure2_panel_a_phos_stacked.png"
+plt.savefig(panel_a, dpi=DPI_PANEL, transparent=True); plt.close()
+
+# ============================================================
+# Panel B: Phospho intensity boxplot (log2)  [UNCHANGED]
+# ============================================================
+print("Panel B: Phospho intensity boxplot")
+log2_per_cond = {c: [] for c in CONDITIONS}
+unique_per_cond = {c: set() for c in CONDITIONS}
+for cname, reps in CONDITIONS.items():
+    for r in reps:
+        col = next(c for c in quant_cols if r in c)
+        det = detected_mask(pp_phos[col])
+        df_int = pp_phos[['PP.PIMID']].copy()
+        df_int['_v'] = pd.to_numeric(pp_phos[col], errors='coerce')
+        df_int = df_int[det]
+        pimid_max = df_int.groupby('PP.PIMID')['_v'].max()
+        log2_per_cond[cname].extend(np.log2(pimid_max.values))
+        unique_per_cond[cname].update(pimid_max.index)
+
+fig, ax = plt.subplots(figsize=FIGSIZE)
+bp = ax.boxplot([log2_per_cond[c] for c in CONDITIONS], positions=x, widths=0.55,
+                patch_artist=True, showfliers=False, showcaps=False,
+                medianprops=dict(color='red', linewidth=2),
+                whiskerprops=dict(linewidth=1.2),
+                boxprops=dict(linewidth=1.2))
+for patch, color in zip(bp['boxes'], COLORS):
+    patch.set_facecolor(color); patch.set_alpha(0.9)
+y_min, y_max = 5, 12.5
+for i, c in enumerate(CONDITIONS):
+    med = np.median(log2_per_cond[c])
+    n_unique = len(unique_per_cond[c])
+    ax.text(i, med + 0.1, f'{med:.1f}',
+            ha='center', va='bottom', fontsize=FS_VALUE)
+    ax.text(i, y_min + 0.1, f'n={n_unique}',
+            ha='center', va='bottom', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(list(CONDITIONS.keys()), fontsize=FS_TICK)
+ax.set_xlabel('Frit material', fontsize=FS_LABEL)
+ax.set_ylabel('Phosphopeptide intensity (log$_2$)', fontsize=FS_LABEL)
+ax.set_ylim(y_min, y_max)
+ax.set_yticks([6, 8, 10, 12])
+style_ax(ax); plt.tight_layout()
+panel_b = f"{OUTDIR}/figure2_panel_b_phos_intensity.png"
+plt.savefig(panel_b, dpi=DPI_PANEL, transparent=True); plt.close()
+
+# ============================================================
+# Panel C: Phospho CV violin  [MODIFIED: n= -> median CV]
+# ============================================================
+print("Panel C: Phospho CV violin")
+cv_phos = {}
+for cname, reps in CONDITIONS.items():
+    cond_cols = [next(c for c in quant_cols if r in c) for r in reps]
+    cv_phos[cname] = cv_distribution(pp_phos, 'PP.PIMID', cond_cols, min_reps=3)
+
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts = ax.violinplot([cv_phos[c] for c in CONDITIONS], positions=x,
+                       showmedians=False, showextrema=False)
+for pc, color in zip(parts['bodies'], COLORS):
+    pc.set_facecolor(color); pc.set_alpha(0.85); pc.set_edgecolor('black'); pc.set_linewidth(1.0)
+ax.boxplot([cv_phos[c] for c in CONDITIONS], positions=x, widths=0.15,
+           patch_artist=False, showfliers=False,
+           medianprops=dict(color='red', linewidth=2),
+           whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+# MODIFIED: show median CV value instead of n=xx
+for i, c in enumerate(CONDITIONS):
+    med_cv = np.median(cv_phos[c])
+    ax.text(i, -3, f'{med_cv:.1f}%', ha='center', va='center', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(list(CONDITIONS.keys()), fontsize=FS_TICK)
+ax.set_xlabel('Frit material', fontsize=FS_LABEL)
+ax.set_ylabel('Phosphopeptide CV (%)', fontsize=FS_LABEL)
+ax.set_ylim(-5, 80); ax.set_yticks([0, 20, 40, 60, 80])
+style_ax(ax); plt.tight_layout()
+panel_c = f"{OUTDIR}/figure2_panel_c_phos_cv.png"
+plt.savefig(panel_c, dpi=DPI_PANEL, transparent=True); plt.close()
+
+# ============================================================
+# Panel D: Peptide length violin  [MODIFIED: n= -> median length]
+# ============================================================
+print("Panel D: Peptide length violin")
+length_per_cond = {c: [] for c in CONDITIONS}
+n_unique_per_cond = {c: 0 for c in CONDITIONS}
+for cname, reps in CONDITIONS.items():
+    cond_cols = [next(c for c in quant_cols if r in c) for r in reps]
+    detection_count = pd.Series(0, index=pp_phos.index)
+    for col in cond_cols:
+        detection_count = detection_count + detected_mask(pp_phos[col]).astype(int)
+    keep = pp_phos[detection_count >= 3].drop_duplicates('PEP.StrippedSequence')
+    length_per_cond[cname] = keep['length'].dropna().astype(int).tolist()
+    n_unique_per_cond[cname] = len(keep)
+
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts = ax.violinplot([length_per_cond[c] for c in CONDITIONS], positions=x,
+                       showmedians=False, showextrema=False)
+for pc, color in zip(parts['bodies'], COLORS):
+    pc.set_facecolor(color); pc.set_alpha(0.85); pc.set_edgecolor('black'); pc.set_linewidth(1.0)
+ax.boxplot([length_per_cond[c] for c in CONDITIONS], positions=x, widths=0.15,
+           patch_artist=False, showfliers=False,
+           medianprops=dict(color='red', linewidth=2),
+           whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+# MODIFIED: show median length value instead of n=xx
+for i, c in enumerate(CONDITIONS):
+    med_len = np.median(length_per_cond[c])
+    ax.text(i, 4.5, f'{med_len:.0f}', ha='center', va='center', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(list(CONDITIONS.keys()), fontsize=FS_TICK)
+ax.set_xlabel('Frit material', fontsize=FS_LABEL)
+ax.set_ylabel('Peptide length (aa)', fontsize=FS_LABEL)
+ax.set_ylim(3, 55)
+style_ax(ax); plt.tight_layout()
+panel_d = f"{OUTDIR}/figure2_panel_d_pep_length.png"
+plt.savefig(panel_d, dpi=DPI_PANEL, transparent=True); plt.close()
+
+# ============================================================
+# Assemble (2x2)
+# ============================================================
+print("\nAssembling Figure 2...")
+fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+axes = axes.flatten()
+for ax, (path, letter) in zip(axes, [(panel_a, 'A'), (panel_b, 'B'),
+                                      (panel_c, 'C'), (panel_d, 'D')]):
+    img = mpimg.imread(path)
+    ax.imshow(img); ax.axis('off')
+    ax.text(-0.08, 1.05, letter, transform=ax.transAxes,
+            fontsize=18, fontweight='bold', ha='left', va='bottom')
+plt.tight_layout(pad=0.5)
+out_path = f"{OUTDIR}/Figure2_IMAC_frit.png"
+plt.savefig(out_path, dpi=DPI_ASSEMBLED, bbox_inches='tight', transparent=True)
+plt.close()
+print(f"Saved {out_path}")
+
+# Summary
+print("\n=== Summary ===")
+for c in CONDITIONS:
+    pp_total = np.mean(mono_per_rep[c]) + np.mean(multi_per_rep[c])
+    print(f"  {c:<5}: PP={pp_total:.0f}, CV med={np.median(cv_phos[c]):.1f}%, "
+          f"len med={np.median(length_per_cond[c]):.0f}")
