@@ -1,0 +1,201 @@
+"""
+Supplementary Figure 7: 3-fraction Venn diagrams for phosphopeptide overlap
+across GP / AP / ACN fractions, comparing C8 (Panel A) vs GF-C (Panel B).
+
+Self-contained. Computes 7-region values from raw data, then plots both panels
+side-by-side.
+
+Detection rule: >=2 of N replicates with intensity > 0.
+Cross-pipeline overlap: PP fraction (Spectronaut) and GP fraction (FragPipe)
+joined at the stripped-sequence level.
+
+Data:
+    Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv   (PP, Spectronaut)
+    Exp3-GP_combined_modified_peptide.tsv              (GP, FragPipe)
+"""
+import os
+import re
+import warnings
+
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib_venn import venn3, venn3_circles
+
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+
+
+PP_PATH = "/mnt/user-data/uploads/Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv"
+GP_PATH = "/mnt/user-data/uploads/Exp3-GP_combined_modified_peptide.tsv"
+OUTDIR = "/mnt/user-data/outputs"
+os.makedirs(OUTDIR, exist_ok=True)
+
+
+# ============================================================
+# Compute region values from raw data
+# ============================================================
+print("Loading data...")
+pp = pd.read_csv(PP_PATH, low_memory=False)
+pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
+pp_phos = pp[pp['is_phospho']].copy()
+pp_quant_cols = [c for c in pp.columns if 'Label-Free Quant' in c]
+
+gp = pd.read_csv(GP_PATH, sep='\t', low_memory=False)
+gp['has_glyco']   = gp['Assigned Modifications'].str.contains(r'N\(', na=False)
+gp['has_phospho'] = gp['Assigned Modifications'].str.contains(r'79\.9663', na=False)
+gp_phos_only = gp[gp['has_phospho'] & ~gp['has_glyco']].copy()
+
+
+def cols_for(pat, drop_r1=False):
+    cols = [c for c in pp_quant_cols if pat in c]
+    if drop_r1: cols = [c for c in cols if '-R1_' not in c]
+    return cols
+
+
+def pp_seqs(cols, min_reps=2):
+    """Stripped sequences detected in PP fraction in >=min_reps replicates."""
+    df = pp_phos[['PEP.StrippedSequence'] + cols].copy()
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    g = df.groupby('PEP.StrippedSequence')[cols].max()
+    valid = g.where(g > 0)
+    keep = valid[valid.notna().sum(axis=1) >= min_reps]
+    return set(keep.index)
+
+
+def gp_seqs(cols, min_reps=2):
+    df = gp_phos_only[['Peptide Sequence'] + cols].copy()
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    g = df.groupby('Peptide Sequence')[cols].max()
+    valid = g.where(g > 0)
+    keep = valid[valid.notna().sum(axis=1) >= min_reps]
+    return set(keep.index)
+
+
+gp_int_cols = [c for c in gp.columns if c.endswith(' Intensity') and 'MaxLFQ' not in c]
+
+
+def venn_subsets(A, B, C):
+    """Return (Abc, aBc, ABc, abC, AbC, aBC, ABC) — venn3 subset order."""
+    return (
+        len(A - B - C),    # 100: A only
+        len(B - A - C),    # 010: B only
+        len(A & B - C),    # 110: A∩B
+        len(C - A - B),    # 001: C only
+        len(A & C - B),    # 101: A∩C
+        len(B & C - A),    # 011: B∩C
+        len(A & B & C),    # 111: all three
+    )
+
+
+# C8 sets (A=GP, B=AP, C=ACN); all 4 reps
+A_c8 = gp_seqs([c for c in gp_int_cols if c.startswith('C8_GP')])
+B_c8 = pp_seqs(cols_for('C8-Sep-PP-Aq'))
+C_c8 = pp_seqs(cols_for('C8-Sep-PP-ACN'))
+c8_subsets = venn_subsets(A_c8, B_c8, C_c8)
+
+# GFC sets; AP/ACN drop R1
+A_gfc = gp_seqs([c for c in gp_int_cols if c.startswith('GFC_GP')])
+B_gfc = pp_seqs(cols_for('GFC-Sep-PP-Aq', drop_r1=True))
+C_gfc = pp_seqs(cols_for('GFC-Sep-PP-ACN', drop_r1=True))
+gfc_subsets = venn_subsets(A_gfc, B_gfc, C_gfc)
+
+print(f"\nC8  (sizes A=GP={len(A_c8)}, B=AP={len(B_c8)}, C=ACN={len(C_c8)}):")
+print(f"  GP only={c8_subsets[0]}, AP only={c8_subsets[1]}, GP∩AP={c8_subsets[2]}, "
+      f"ACN only={c8_subsets[3]}, GP∩ACN={c8_subsets[4]}, AP∩ACN={c8_subsets[5]}, "
+      f"all={c8_subsets[6]}")
+print(f"GFC (sizes A=GP={len(A_gfc)}, B=AP={len(B_gfc)}, C=ACN={len(C_gfc)}):")
+print(f"  GP only={gfc_subsets[0]}, AP only={gfc_subsets[1]}, GP∩AP={gfc_subsets[2]}, "
+      f"ACN only={gfc_subsets[3]}, GP∩ACN={gfc_subsets[4]}, AP∩ACN={gfc_subsets[5]}, "
+      f"all={gfc_subsets[6]}")
+
+
+# ============================================================
+# Plot
+# ============================================================
+print("\nDrawing Venn diagrams...")
+set_colors = ['#E8916D', '#7FABD6', '#A0B5D0']
+LABEL_FS = 18
+NUMBER_FS = 8
+
+xmin, xmax = -0.70, 0.70
+ymin, ymax = -0.72, 0.65
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 6.5))
+plt.subplots_adjust(wspace=0.05)
+
+
+def draw_venn(ax, subsets, panel_letter, custom_layout):
+    """custom_layout(v, ax) is called to apply panel-specific label tweaks."""
+    plt.sca(ax)
+    v = venn3(subsets=subsets, set_labels=('GP', 'AP', 'ACN'),
+              set_colors=set_colors, alpha=0.55)
+    venn3_circles(subsets=subsets, linestyle='solid', linewidth=1.5, color='black')
+    for r in ['100', '010', '001', '110', '101', '011', '111']:
+        lab = v.get_label_by_id(r)
+        if lab:
+            lab.set_fontsize(NUMBER_FS); lab.set_fontweight('bold')
+    for sid in ['A', 'B', 'C']:
+        lbl = v.get_label_by_id(sid)
+        if lbl:
+            lbl.set_fontsize(13); lbl.set_fontweight('bold')
+    custom_layout(v, ax)
+    ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax); ax.set_aspect('equal')
+    ax.text(-0.08, 1.05, panel_letter, transform=ax.transAxes,
+            fontsize=LABEL_FS, fontweight='bold', ha='left', va='bottom')
+
+
+def c8_layout(v, ax):
+    # Centre 130 (GP-only), 306 (AP-only), 782 (GP∩ACN); leader-pull 3 (GP∩AP)
+    v.get_label_by_id('100').set_position((-0.05, 0.48))   # 130
+    v.get_label_by_id('010').set_position((0.45, 0.30))    # 306
+    v.get_label_by_id('101').set_position((-0.02, 0.25))   # 782
+    lab = v.get_label_by_id('110'); pos = lab.get_position(); lab.set_visible(False)
+    ax.annotate(str(v.get_label_by_id('110').get_text()) if False else
+                f"{c8_subsets[2]}",
+                xy=pos, xytext=(pos[0], pos[1] + 0.12),
+                fontsize=NUMBER_FS, fontweight='bold', ha='center', va='center',
+                arrowprops=dict(arrowstyle='-', color='black', lw=0.8))
+
+
+def gfc_layout(v, ax):
+    # Move 357 (GP-only) right; nudge 270 (all) down, 694 (GP∩AP) up,
+    # 206 (AP∩ACN) left-down; leader-pull 2 (GP∩ACN) and 14 (ACN-only).
+    v.get_label_by_id('100').set_position((-0.50, 0.02))  # 357
+    lab = v.get_label_by_id('111'); pos = lab.get_position()
+    lab.set_position((pos[0], pos[1] - 0.05))             # 270 down
+    lab = v.get_label_by_id('110'); pos = lab.get_position()
+    lab.set_position((pos[0], pos[1] + 0.02))             # 694 up
+    lab = v.get_label_by_id('011'); pos = lab.get_position()
+    lab.set_position((pos[0] - 0.04, pos[1] - 0.03))      # 206 left-down
+
+    # 2 (GP∩ACN): horizontal leader to left
+    lab = v.get_label_by_id('101'); pos = lab.get_position(); lab.set_visible(False)
+    ax.annotate(f"{gfc_subsets[4]}",
+                xy=pos, xytext=(pos[0] - 0.15, pos[1]),
+                fontsize=NUMBER_FS, fontweight='bold', ha='center', va='center',
+                arrowprops=dict(arrowstyle='-', color='black', lw=0.8))
+
+    # 14 (ACN-only): vertical leader down
+    lab = v.get_label_by_id('001'); pos = lab.get_position(); lab.set_visible(False)
+    ax.annotate(f"{gfc_subsets[3]}",
+                xy=pos, xytext=(pos[0], pos[1] - 0.10),
+                fontsize=NUMBER_FS, fontweight='bold', ha='center', va='center',
+                arrowprops=dict(arrowstyle='-', color='black', lw=0.8))
+
+    # ACN set label: shift left to clear the leaders
+    acn_lab = v.get_label_by_id('C')
+    if acn_lab:
+        acn_lab.set_position((-0.60, -0.35))
+
+
+draw_venn(axes[0], c8_subsets, 'A', c8_layout)
+draw_venn(axes[1], gfc_subsets, 'B', gfc_layout)
+
+out_path = f"{OUTDIR}/SuppFig7_phos_venn.png"
+plt.savefig(out_path, dpi=600, bbox_inches='tight')
+plt.close()
+print(f"Saved {out_path}")
