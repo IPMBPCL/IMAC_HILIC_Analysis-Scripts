@@ -1,0 +1,282 @@
+"""
+Figure 3: HILIC frit comparison (C8 vs GF-A vs GF-C vs GF-F).
+Self-contained script. Loads raw data, generates 4 individual panels at 600 DPI,
+and assembles them into a 2x2 grid at 300 DPI.
+Data:
+    1140881-1140896_frit_test_final_merged_results_with_composition_split.csv
+Panels:
+    A: Modified-peptide stacked bar (glyco + phospho-only)
+    B: N-glycopeptide intensity boxplot (log2)
+    C: N-glycopeptide CV violin       (bottom label = median CV %)
+    D: Glycan classification stacked %  (Truncated / Pauci / High mannose / Complex)
+"""
+import os
+import re
+from itertools import product
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+# ============================================================
+# Configuration
+# ============================================================
+DATA_PATH = "/mnt/user-data/uploads/1140881-1140896_frit_test_final_merged_results_with_composition_split.csv"
+OUTDIR = "/mnt/user-data/outputs"
+os.makedirs(OUTDIR, exist_ok=True)
+DPI_PANEL = 600
+DPI_ASSEMBLED = 600
+FIGSIZE = (3, 3)
+FS_LABEL, FS_TICK, FS_LEGEND, FS_VALUE, FS_N = 10, 9, 6, 8, 6
+COLORS = ['#AADCFA', '#78A5C8', '#8CB9B9', '#C8D2E6']
+CONDITIONS = {
+    'C8':   ['C8_1', 'C8_2', 'C8_3', 'C8_4'],
+    'GF-A': ['GF_A_1', 'GF_A_2', 'GF_A_3', 'GF_A_4'],
+    'GF-C': ['GF_C_1', 'GF_C_2', 'GF_C_3', 'GF_C_4'],
+    'GF-F': ['GF_F_1', 'GF_F_2', 'GF_F_3', 'GF_F_4'],
+}
+# ============================================================
+# Helpers
+# ============================================================
+def detected_mask(s):
+    """Standard detection: numeric, non-NaN, strictly positive."""
+    s = pd.to_numeric(s, errors='coerce')
+    return s.notna() & (s > 0)
+def style_ax(ax):
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5); spine.set_color('black')
+    ax.tick_params(width=1.5, length=4, labelsize=FS_TICK)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.set_axisbelow(True)
+    ax.set_facecolor('none')
+def cv_distribution(df, key_col, cond_cols, min_reps=3):
+    sub = df[[key_col] + list(cond_cols)].copy()
+    for c in cond_cols:
+        sub[c] = pd.to_numeric(sub[c], errors='coerce')
+    g = sub.groupby(key_col)[list(cond_cols)].max()
+    valid = g.where(g > 0)
+    keep = valid[valid.notna().sum(axis=1) >= min_reps]
+    means = keep.mean(axis=1, skipna=True); stds = keep.std(axis=1, skipna=True)
+    return (stds / means * 100).dropna().values
+# Glycan composition library (for Panel D classification)
+MASS = {'HexNAc': 203.0794, 'Hex': 162.0528, 'dHex': 146.0579,
+        'Pent': 132.0423, 'NeuAc': 291.0954}
+LIB = {}
+for hn, hx, fc, px, na in product(range(9), range(13), range(4), range(4), range(5)):
+    if hn == 0 and hx == 0:
+        continue
+    LIB[(hn, hx, fc, px, na)] = (
+        hn*MASS['HexNAc'] + hx*MASS['Hex'] + fc*MASS['dHex']
+        + px*MASS['Pent'] + na*MASS['NeuAc']
+    )
+LIB_ITEMS = list(LIB.items())
+def parse_glycan_mass(mods):
+    if pd.isna(mods): return None
+    m = re.findall(r'N\(([\d.]+)\)', str(mods))
+    return float(m[0]) if m else None
+def match_composition(mass, tol=0.05):
+    best, best_err = None, tol
+    for comp, cm in LIB_ITEMS:
+        e = abs(cm - mass)
+        if e < best_err:
+            best_err = e; best = comp
+    return best
+def classify_4class(comp):
+    """4-class: Truncated / Paucimannose / High mannose / Complex (Hybrid folded into Complex)."""
+    if comp is None: return 'Unknown'
+    hn, hx, fc, px, na = comp
+    if hn < 2: return 'Truncated'
+    if hn == 2 and hx <= 3 and na == 0: return 'Paucimannose'
+    if hn == 2 and hx >= 4 and fc == 0 and px == 0 and na == 0: return 'High mannose'
+    if hn >= 3: return 'Complex'
+    return 'Unknown'
+# ============================================================
+# Load and dedup
+# ============================================================
+print("Loading data...")
+df = pd.read_csv(DATA_PATH)
+df['has_phospho'] = df['Assigned Modifications'].str.contains(r'79\.9663', na=False)
+df['has_glyco']   = df['Assigned Modifications'].str.contains(r'N\(', na=False)
+int_cols = [c for c in df.columns if 'Intensity' in c and 'MaxLFQ' not in c]
+# Glyco dedup: peptide sequence + glycan composition
+glyco = df[df['has_glyco'] & df['Composition'].notna()].copy()
+glyco['glyco_key'] = glyco['Peptide Sequence'].astype(str) + '|' + glyco['Composition'].astype(str)
+glyco_int = glyco.groupby('glyco_key')[int_cols].max().reset_index()
+glyco_meta = glyco.drop_duplicates(subset='glyco_key').set_index('glyco_key')
+for col in ['Assigned Modifications', 'Peptide Sequence']:
+    glyco_int[col] = glyco_int['glyco_key'].map(glyco_meta[col])
+# Phospho dedup: peptide sequence + sorted phospho sites
+phos = df[df['has_phospho'] & ~df['has_glyco']].copy()
+def _phos_key(row):
+    seq = str(row['Peptide Sequence']); mods = str(row['Assigned Modifications'])
+    pmods = sorted(m.strip() for m in mods.split(',') if '79.9663' in m)
+    return seq + '|' + ','.join(pmods)
+phos['phos_key'] = phos.apply(_phos_key, axis=1)
+phos_int = phos.groupby('phos_key')[int_cols].max().reset_index()
+print(f"  Glyco:   {len(glyco)} -> {len(glyco_int)} unique")
+print(f"  Phospho: {len(phos)}  -> {len(phos_int)} unique")
+# ============================================================
+# Panel A: Modified-peptide stacked bar
+# ============================================================
+print("\nPanel A: Modified-peptide stacked bar")
+glyco_per_rep = {c: [] for c in CONDITIONS}
+phos_per_rep  = {c: [] for c in CONDITIONS}
+for cname, reps in CONDITIONS.items():
+    for r in reps:
+        col = next(c for c in int_cols if r in c)
+        glyco_per_rep[cname].append(detected_mask(glyco_int[col]).sum())
+        phos_per_rep[cname].append(detected_mask(phos_int[col]).sum())
+glyco_means = [np.mean(glyco_per_rep[c]) for c in CONDITIONS]
+phos_means  = [np.mean(phos_per_rep[c])  for c in CONDITIONS]
+totals = [g + p for g, p in zip(glyco_means, phos_means)]
+total_sds = [np.std([glyco_per_rep[c][i] + phos_per_rep[c][i]
+                     for i in range(len(CONDITIONS[c]))], ddof=1) for c in CONDITIONS]
+x = np.arange(len(CONDITIONS)); width = 0.6
+fig, ax = plt.subplots(figsize=FIGSIZE)
+b1 = ax.bar(x, phos_means, width, color='#5B9BD5', edgecolor='black', linewidth=1.0,
+            label='Phosphopeptides')
+b2 = ax.bar(x, glyco_means, width, bottom=phos_means, color='#F4A582',
+            edgecolor='black', linewidth=1.0, label='N-glycopeptides')
+ax.errorbar(x, totals, yerr=total_sds, fmt='none', ecolor='black',
+            capsize=3, capthick=1.0, linewidth=1.0)
+for i in range(len(CONDITIONS)):
+    if phos_means[i] > totals[i] * 0.05:
+        ax.text(i, phos_means[i] / 2, f'{phos_means[i]:.0f}',
+                ha='center', va='center', fontsize=FS_VALUE, fontweight='bold', color='white')
+    if glyco_means[i] > totals[i] * 0.05:
+        ax.text(i, phos_means[i] + glyco_means[i] / 2, f'{glyco_means[i]:.0f}',
+                ha='center', va='center', fontsize=FS_VALUE, fontweight='bold', color='black')
+ax.set_xticks(x); ax.set_xticklabels(list(CONDITIONS.keys()), fontsize=FS_TICK)
+ax.set_ylabel('Number of modified peptides', fontsize=FS_LABEL)
+ax.set_ylim(0, 4500); ax.set_yticks([0, 1000, 2000, 3000, 4000])
+ax.legend([b2, b1], ['N-glycopeptides', 'Phosphopeptides'],
+          loc='upper left', fontsize=FS_LEGEND,
+          framealpha=0.95, edgecolor='black')
+style_ax(ax)
+plt.tight_layout()
+panel_a = f"{OUTDIR}/figure3_panel_a_modified_stacked.png"
+plt.savefig(panel_a, dpi=DPI_PANEL, transparent=True); plt.close()
+# ============================================================
+# Panel B: Glyco intensity boxplot
+# ============================================================
+print("Panel B: N-glycopeptide intensity boxplot")
+glyco_log2 = {c: [] for c in CONDITIONS}
+glyco_unique = {c: set() for c in CONDITIONS}
+for cname, reps in CONDITIONS.items():
+    for r in reps:
+        col = next(c for c in int_cols if r in c)
+        det = detected_mask(glyco_int[col])
+        vals = pd.to_numeric(glyco_int[col], errors='coerce')
+        glyco_log2[cname].extend(np.log2(vals[det].values))
+        glyco_unique[cname].update(glyco_int.loc[det, 'glyco_key'])
+fig, ax = plt.subplots(figsize=FIGSIZE)
+bp = ax.boxplot([glyco_log2[c] for c in CONDITIONS], positions=x, widths=0.55,
+                patch_artist=True, showfliers=False, showcaps=False,
+                medianprops=dict(color='red', linewidth=2),
+                whiskerprops=dict(linewidth=1.0),
+                boxprops=dict(linewidth=1.0))
+for patch, color in zip(bp['boxes'], COLORS):
+    patch.set_facecolor(color); patch.set_alpha(0.9)
+y_min = 11
+for i, c in enumerate(CONDITIONS):
+    med = np.median(glyco_log2[c]); n_unique = len(glyco_unique[c])
+    ax.text(i, med + 0.15, f'{med:.1f}', ha='center', va='bottom',
+            fontsize=FS_VALUE, color='black')
+    ax.text(i, y_min - 0.5, f'n={n_unique}', ha='center', va='center',
+            fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(list(CONDITIONS.keys()), fontsize=FS_TICK)
+ax.set_ylabel('N-glycopeptide intensity (log$_2$)', fontsize=FS_LABEL)
+ax.set_ylim(10, 20)
+style_ax(ax)
+plt.tight_layout()
+panel_b = f"{OUTDIR}/figure3_panel_b_glyco_intensity.png"
+plt.savefig(panel_b, dpi=DPI_PANEL, transparent=True); plt.close()
+# ============================================================
+# Panel C: Glyco CV violin   (bottom label = median CV %)
+# ============================================================
+print("Panel C: N-glycopeptide CV violin")
+cv_data = {}
+for cname, reps in CONDITIONS.items():
+    cond_cols = [next(c for c in int_cols if r in c) for r in reps]
+    cv_data[cname] = cv_distribution(glyco_int, 'glyco_key', cond_cols, min_reps=3)
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts = ax.violinplot([cv_data[c] for c in CONDITIONS], positions=x,
+                       showmedians=False, showextrema=False)
+for pc, color in zip(parts['bodies'], COLORS):
+    pc.set_facecolor(color); pc.set_alpha(0.85); pc.set_edgecolor('black'); pc.set_linewidth(1.0)
+ax.boxplot([cv_data[c] for c in CONDITIONS], positions=x, widths=0.18,
+           patch_artist=False, showfliers=False,
+           medianprops=dict(color='red', linewidth=2),
+           whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+for i, c in enumerate(CONDITIONS):
+    med = np.median(cv_data[c])
+    ax.text(i, -3, f'{med:.1f}%', ha='center', va='center', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(list(CONDITIONS.keys()), fontsize=FS_TICK)
+ax.set_ylabel('N-glycopeptide CV (%)', fontsize=FS_LABEL)
+ax.set_ylim(-5, 80); ax.set_yticks([0, 20, 40, 60, 80])
+style_ax(ax)
+plt.tight_layout()
+panel_c = f"{OUTDIR}/figure3_panel_c_glyco_cv.png"
+plt.savefig(panel_c, dpi=DPI_PANEL, transparent=True); plt.close()
+# ============================================================
+# Panel D: Glycan classification stacked %
+# ============================================================
+print("Panel D: Glycan classification")
+glyco_int['_mass'] = glyco_int['Assigned Modifications'].apply(parse_glycan_mass)
+glyco_int['_comp'] = glyco_int['_mass'].apply(lambda m: match_composition(m) if m else None)
+glyco_int['_class'] = glyco_int['_comp'].apply(classify_4class)
+CLASSES = ['Truncated', 'Paucimannose', 'High mannose', 'Complex']
+CLASS_COLORS = {'Truncated': '#EF9A9A', 'Paucimannose': '#F4A784',
+                'High mannose': '#FFD54F', 'Complex': '#81D4FA'}
+class_pcts = {cls: [] for cls in CLASSES}
+for cname, reps in CONDITIONS.items():
+    cond_cols = [next(c for c in int_cols if r in c) for r in reps]
+    sub = glyco_int[glyco_int['_comp'].notna()].copy()
+    n_det = pd.DataFrame({c: detected_mask(sub[c]).astype(int) for c in cond_cols}).sum(axis=1)
+    keep = sub[n_det >= 3]
+    counts = keep['_class'].value_counts()
+    total = sum(counts.get(cls, 0) for cls in CLASSES)
+    for cls in CLASSES:
+        class_pcts[cls].append(counts.get(cls, 0) / total * 100 if total else 0)
+fig, ax = plt.subplots(figsize=FIGSIZE)
+bottom = np.zeros(len(CONDITIONS))
+for cls in CLASSES:
+    vals = class_pcts[cls]
+    ax.bar(x, vals, width, bottom=bottom, color=CLASS_COLORS[cls],
+           edgecolor='black', linewidth=1.0, label=cls)
+    for i, v in enumerate(vals):
+        if v > 4:
+            ax.text(i, bottom[i] + v / 2, f'{v:.0f}%',
+                    ha='center', va='center', fontsize=FS_VALUE,
+                    fontweight='bold', color='black')
+    bottom += np.array(vals)
+ax.set_xticks(x); ax.set_xticklabels(list(CONDITIONS.keys()), fontsize=FS_TICK)
+ax.set_ylabel('Proportion (%)', fontsize=FS_LABEL); ax.set_ylim(0, 100)
+ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.22), ncol=2,
+          fontsize=FS_LEGEND, frameon=False, columnspacing=0.8)
+style_ax(ax)
+plt.tight_layout()
+panel_d = f"{OUTDIR}/figure3_panel_d_glycan_class.png"
+plt.savefig(panel_d, dpi=DPI_PANEL, transparent=True); plt.close()
+# ============================================================
+# Assemble
+# ============================================================
+print("\nAssembling Figure 3...")
+fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+fig.patch.set_alpha(0.0)
+axes = axes.flatten()
+for ax, (path, letter) in zip(axes, [(panel_a, 'A'), (panel_b, 'B'),
+                                       (panel_c, 'C'), (panel_d, 'D')]):
+    img = mpimg.imread(path)
+    ax.imshow(img); ax.axis('off')
+    ax.text(-0.08, 1.05, letter, transform=ax.transAxes,
+            fontsize=18, fontweight='bold', ha='left', va='bottom')
+plt.tight_layout(pad=0.5)
+out_path = f"{OUTDIR}/Figure3_HILIC_frit_transparent.png"
+plt.savefig(out_path, dpi=DPI_ASSEMBLED, bbox_inches='tight', transparent=True)
+plt.close()
+print(f"Saved {out_path}")
