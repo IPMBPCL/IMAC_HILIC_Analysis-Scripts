@@ -1,0 +1,385 @@
+"""
+Figure 5: Phase 3 single-tip comparison (C8 vs GF-C borosilicate vs TIMAHAC tandem).
+TRANSPARENT background version. Self-contained. 8 panels in 2x4 layout.
+
+Detection columns are clean: startswith() avoids the GFC2mg_GP collision,
+the dataset carries no exposed REV decoy intensity columns, and MaxLFQ
+columns are excluded. Numbers are identical to the original Figure 5; only
+the background is made transparent and the assembled DPI raised to 600.
+
+Data:
+    Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv  (PP fraction, Spectronaut)
+    Exp3-GP_combined_modified_peptide.tsv             (GP fraction, FragPipe)
+    1150482-1150497_Exp3-GP_Summary.xlsx              (GP summary for counts)
+Panels:
+    A: N-glycopeptide count by workflow (C8/GFC/TIM, n=4 each)
+    B: GP fraction composition (N-glyco / Phos / Unmod) %
+    C: N-glyco CV violin
+    D: Glycan classification stacked %  (4-class, Hybrid folded into Complex)
+    E: Phospho count by workflow x fraction (C8 AP/ACN, GFC AP/ACN)
+    F: Phospho selectivity dot plot (red mean line)
+    G: Phospho workflow comparison: C8 (AP+ACN) vs GFC (AP) vs TIMAHAC
+    H: Phospho CV violin (C8 ACN, GFC AP, TIMAHAC)
+Notes:
+    - GFC AP rep R1 excluded as outlier (drop_r1=True)
+    - All PP panels recomputed from raw prec.csv for internal consistency
+"""
+import os
+import re
+from itertools import product
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+
+# ============================================================
+# Configuration
+# ============================================================
+PP_PATH = "/mnt/user-data/uploads/Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv"
+GP_PATH = "/mnt/user-data/uploads/Exp3-GP_combined_modified_peptide.tsv"
+GP_SUMMARY_PATH = "/mnt/user-data/uploads/1150482-1150497_Exp3-GP_Summary.xlsx"
+OUTDIR = "/mnt/user-data/outputs"
+PANELDIR = "/home/claude/fig5_panels"
+os.makedirs(OUTDIR, exist_ok=True)
+os.makedirs(PANELDIR, exist_ok=True)
+DPI_PANEL = 600; DPI_ASSEMBLED = 600
+TRANSPARENT = True
+FIGSIZE = (3, 3)
+FS_LABEL, FS_TICK, FS_LEGEND, FS_VALUE, FS_N = 10, 9, 6, 8, 6
+COLORS_3 = ['#AADCFA', '#78A5C8', '#C8D2E6']  # C8 / GF-C / TIMAHAC
+COLOR_MONO, COLOR_MULTI = '#87CEFA', '#4682B4'
+COLOR_GLYCO, COLOR_PHOS, COLOR_OTHER = '#F4A582', '#5B9BD5', '#D9D9D9'
+SAVE = dict(dpi=DPI_PANEL, transparent=TRANSPARENT, bbox_inches='tight')
+PP_GROUPS_E = {
+    'C8\nAP':    ('C8-Sep-PP-Aq',  False),
+    'C8\nACN':   ('C8-Sep-PP-ACN', False),
+    'GF-C\nAP':  ('GFC-Sep-PP-Aq', True),    # drop R1
+    'GF-C\nACN': ('GFC-Sep-PP-ACN', False),
+}
+
+# ============================================================
+# Helpers
+# ============================================================
+def detected_mask(s):
+    s = pd.to_numeric(s, errors='coerce')
+    return s.notna() & (s > 0)
+def style_ax(ax):
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5); spine.set_color('black')
+    ax.tick_params(width=1.5, length=4, labelsize=FS_TICK)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.set_axisbelow(True)
+    ax.set_facecolor('none')
+def cv_distribution(df, key_col, cond_cols, min_reps=3):
+    sub = df[[key_col] + list(cond_cols)].copy()
+    for c in cond_cols:
+        sub[c] = pd.to_numeric(sub[c], errors='coerce')
+    g = sub.groupby(key_col)[list(cond_cols)].max()
+    valid = g.where(g > 0)
+    keep = valid[valid.notna().sum(axis=1) >= min_reps]
+    means = keep.mean(axis=1, skipna=True); stds = keep.std(axis=1, skipna=True)
+    return (stds / means * 100).dropna().values
+
+MASS = {'HexNAc': 203.0794, 'Hex': 162.0528, 'dHex': 146.0579, 'Pent': 132.0423, 'NeuAc': 291.0954}
+LIB = {}
+for hn, hx, fc, px, na in product(range(9), range(13), range(4), range(4), range(5)):
+    if hn == 0 and hx == 0: continue
+    LIB[(hn, hx, fc, px, na)] = (hn*MASS['HexNAc'] + hx*MASS['Hex'] + fc*MASS['dHex'] + px*MASS['Pent'] + na*MASS['NeuAc'])
+LIB_ITEMS = list(LIB.items())
+def parse_glycan_mass(mods):
+    if pd.isna(mods): return None
+    m = re.findall(r'N\(([\d.]+)\)', str(mods)); return float(m[0]) if m else None
+def match_composition(mass, tol=0.05):
+    best, best_err = None, tol
+    for comp, cm in LIB_ITEMS:
+        e = abs(cm - mass)
+        if e < best_err: best_err = e; best = comp
+    return best
+def classify_4class(comp):
+    if comp is None: return 'Unknown'
+    hn, hx, fc, px, na = comp
+    if hn < 2: return 'Truncated'
+    if hn == 2 and hx <= 3 and na == 0: return 'Paucimannose'
+    if hn == 2 and hx >= 4 and fc == 0 and px == 0 and na == 0: return 'High mannose'
+    if hn >= 3: return 'Complex'
+    return 'Unknown'
+def cols_for(quant_cols, pat, drop_r1=False):
+    cols = [c for c in quant_cols if pat in c]
+    if drop_r1: cols = [c for c in cols if '-R1_' not in c]
+    return cols
+def rep_label(c):
+    m = re.search(r'-R(\d+)', c); return m.group(1) if m else None
+
+# ============================================================
+# Load data
+# ============================================================
+print("Loading PP fraction...")
+pp = pd.read_csv(PP_PATH, low_memory=False)
+pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
+pp['n_phospho'] = pp['PP.PIMID'].str.count(r'\[Phospho \(STY\)\]')
+pp_phos = pp[pp['is_phospho']].copy()
+pp_quant_cols = [c for c in pp.columns if 'Label-Free Quant' in c]
+
+print("Loading GP fraction (FragPipe)...")
+gp = pd.read_csv(GP_PATH, sep='\t', low_memory=False)
+gp['has_glyco']   = gp['Assigned Modifications'].str.contains(r'N\(', na=False)
+gp['has_phospho'] = gp['Assigned Modifications'].str.contains(r'79\.9663', na=False)
+gp_glyco = gp[gp['has_glyco']].copy()
+gp_glyco['glycan_mass'] = gp_glyco['Assigned Modifications'].apply(parse_glycan_mass)
+gp_glyco['composition'] = gp_glyco['glycan_mass'].apply(lambda m: match_composition(m) if m is not None else None)
+gp_glyco['glycan_class'] = gp_glyco['composition'].apply(classify_4class)
+gp_glyco['glyco_key'] = (gp_glyco['Peptide Sequence'].astype(str) + '|' + gp_glyco['glycan_mass'].round(2).astype(str))
+gp_int_cols = [c for c in gp.columns if c.endswith(' Intensity') and 'MaxLFQ' not in c]
+
+print("Loading GP summary (xlsx)...")
+df_gp = pd.read_excel(GP_SUMMARY_PATH, sheet_name='Summary', header=3).iloc[:, 2:]
+df_gp.columns = ['Sample_No','Sample_Name','Cond','Total_ID','Glyco','Phos','OtherMod',
+                 'GlycoSpec','PhosSpec','Total_Int','Glyco_Int','Phos_Int',
+                 'GlycoIntSpec','PhosIntSpec','SW']
+df_gp['Group'] = df_gp['Sample_Name'].str.rsplit('_', n=1).str[0]
+
+# ============================================================
+# Panel A
+# ============================================================
+print("\nPanel A: Glyco count")
+groups_a = ['C8_GP', 'GFC_GP', 'TIM_GP']
+labels_a = ['C8', 'GF-C', 'TIMAHAC']
+means_a, sds_a = [], []
+for g in groups_a:
+    sub = df_gp[df_gp['Group']==g]['Glyco']
+    means_a.append(sub.mean()); sds_a.append(sub.std(ddof=1))
+x = np.arange(3); width = 0.55
+fig, ax = plt.subplots(figsize=FIGSIZE)
+ax.bar(x, means_a, width, color=COLORS_3, edgecolor='black', linewidth=1.0)
+ax.errorbar(x, means_a, yerr=sds_a, fmt='none', ecolor='black', capsize=3, capthick=1.0, linewidth=1.0)
+for i, m in enumerate(means_a):
+    ax.text(i, m * 0.5, f'{m:.0f}', ha='center', va='center', fontsize=10, fontweight='bold', color='black')
+ax.set_xticks(x); ax.set_xticklabels(labels_a, fontsize=FS_TICK)
+ax.set_ylabel('Number of N-glycopeptides', fontsize=FS_LABEL)
+ax.set_ylim(0, 4000); ax.set_yticks([0, 800, 1600, 2400, 3200, 4000])
+style_ax(ax); plt.tight_layout()
+panel_a = f"{PANELDIR}/panel_a.png"; plt.savefig(panel_a, **SAVE); plt.close()
+
+# ============================================================
+# Panel B
+# ============================================================
+print("Panel B: GP fraction composition")
+glyco_pcts, phos_pcts, other_pcts = [], [], []
+for g in groups_a:
+    sub = df_gp[df_gp['Group']==g]
+    glyco_pcts.append((sub['Glyco']/sub['Total_ID']*100).mean())
+    phos_pcts.append((sub['Phos']/sub['Total_ID']*100).mean())
+    other_pcts.append(((sub['Total_ID']-sub['Glyco']-sub['Phos'])/sub['Total_ID']*100).mean())
+fig, ax = plt.subplots(figsize=FIGSIZE)
+ax.bar(x, glyco_pcts, width, color=COLOR_GLYCO, edgecolor='black', linewidth=1.0, label='N-glycopeptides')
+ax.bar(x, phos_pcts, width, bottom=glyco_pcts, color=COLOR_PHOS, edgecolor='black', linewidth=1.0, label='Phosphopeptides')
+ax.bar(x, other_pcts, width, bottom=[g+p for g,p in zip(glyco_pcts, phos_pcts)], color=COLOR_OTHER, edgecolor='black', linewidth=1.0, label='Other')
+for i in range(3):
+    gp_v, pp_v, op = glyco_pcts[i], phos_pcts[i], other_pcts[i]
+    if gp_v > 4: ax.text(i, gp_v/2, f'{gp_v:.0f}%', ha='center', va='center', fontsize=FS_VALUE, fontweight='bold', color='black')
+    if pp_v > 4: ax.text(i, gp_v + pp_v/2, f'{pp_v:.0f}%', ha='center', va='center', fontsize=FS_VALUE, fontweight='bold', color='white')
+    if op > 4:   ax.text(i, gp_v + pp_v + op/2, f'{op:.0f}%', ha='center', va='center', fontsize=FS_VALUE, fontweight='bold', color='black')
+ax.set_xticks(x); ax.set_xticklabels(labels_a, fontsize=FS_TICK)
+ax.set_ylabel('Proportion (%)', fontsize=FS_LABEL); ax.set_ylim(0, 100)
+ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.02), ncol=2, fontsize=FS_LEGEND, frameon=False)
+style_ax(ax); plt.tight_layout()
+panel_b = f"{PANELDIR}/panel_b.png"; plt.savefig(panel_b, **SAVE); plt.close()
+
+# ============================================================
+# Panel C
+# ============================================================
+print("Panel C: N-glyco CV violin")
+glyco_cv_data = {}
+for cond, prefix in [('C8', 'C8_GP'), ('GF-C', 'GFC_GP'), ('TIMAHAC', 'TIM_GP')]:
+    cols = [f'{prefix}_{r} Intensity' for r in [1,2,3,4]]
+    cols = [c for c in cols if c in gp.columns]
+    glyco_cv_data[cond] = cv_distribution(gp_glyco, 'glyco_key', cols, min_reps=3)
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts = ax.violinplot([glyco_cv_data[c] for c in glyco_cv_data], positions=x, showmedians=False, showextrema=False)
+for pc, color in zip(parts['bodies'], COLORS_3):
+    pc.set_facecolor(color); pc.set_alpha(0.85); pc.set_edgecolor('black'); pc.set_linewidth(1.0)
+ax.boxplot([glyco_cv_data[c] for c in glyco_cv_data], positions=x, widths=0.18, patch_artist=False, showfliers=False,
+           medianprops=dict(color='red', linewidth=2), whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+for i, c in enumerate(glyco_cv_data):
+    ax.text(i, -3, f'{np.median(glyco_cv_data[c]):.1f}%', ha='center', va='center', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(list(glyco_cv_data.keys()), fontsize=FS_TICK)
+ax.set_ylabel('N-glycopeptide CV (%)', fontsize=FS_LABEL)
+ax.set_ylim(-5, 80); ax.set_yticks([0, 20, 40, 60, 80])
+style_ax(ax); plt.tight_layout()
+panel_c = f"{PANELDIR}/panel_c.png"; plt.savefig(panel_c, **SAVE); plt.close()
+
+# ============================================================
+# Panel D
+# ============================================================
+print("Panel D: Glycan classification")
+classes = ['Truncated', 'Paucimannose', 'High mannose', 'Complex']
+class_colors = {'Truncated': '#EF9A9A', 'Paucimannose': '#F4A784', 'High mannose': '#FFD54F', 'Complex': '#81D4FA'}
+prefixes = [('C8', 'C8_GP'), ('GF-C', 'GFC_GP'), ('TIMAHAC', 'TIM_GP')]
+class_pcts = {cls: [] for cls in classes}
+for label, prefix in prefixes:
+    cond_cols = [c for c in gp_int_cols if c.startswith(prefix + '_')]
+    sub = gp_glyco[gp_glyco['composition'].notna()].copy()
+    n_det = pd.DataFrame({c: detected_mask(sub[c]).astype(int) for c in cond_cols}).sum(axis=1)
+    keep = sub[n_det >= 3].drop_duplicates('glyco_key')
+    counts = keep['glycan_class'].value_counts()
+    total = sum(counts.get(cls, 0) for cls in classes)
+    for cls in classes:
+        class_pcts[cls].append(counts.get(cls, 0) / total * 100 if total else 0)
+fig, ax = plt.subplots(figsize=FIGSIZE)
+bottom = np.zeros(3)
+for cls in classes:
+    vals = class_pcts[cls]
+    ax.bar(x, vals, width, bottom=bottom, color=class_colors[cls], edgecolor='black', linewidth=1.0, label=cls)
+    for i, v in enumerate(vals):
+        if v > 4:
+            ax.text(i, bottom[i] + v / 2, f'{v:.0f}%', ha='center', va='center', fontsize=FS_VALUE, fontweight='bold', color='black')
+    bottom += np.array(vals)
+ax.set_xticks(x); ax.set_xticklabels(labels_a, fontsize=FS_TICK)
+ax.set_ylabel('Proportion (%)', fontsize=FS_LABEL); ax.set_ylim(0, 105)
+ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.22), ncol=2, fontsize=FS_LEGEND, frameon=False, columnspacing=0.8)
+style_ax(ax); plt.tight_layout()
+panel_d = f"{PANELDIR}/panel_d.png"; plt.savefig(panel_d, **SAVE); plt.close()
+
+# ============================================================
+# Panel E
+# ============================================================
+print("Panel E: Phospho count C8/GFC x AP/ACN")
+mono_means_e, multi_means_e, total_sds_e = [], [], []
+for label, (pattern, drop_r1) in PP_GROUPS_E.items():
+    cols = cols_for(pp_quant_cols, pattern, drop_r1=drop_r1)
+    monos, multis, totals = [], [], []
+    for c in cols:
+        det = detected_mask(pp_phos[c]); sub = pp_phos[det].drop_duplicates('PP.PIMID')
+        m = (sub['n_phospho'] == 1).sum(); mu = (sub['n_phospho'] > 1).sum()
+        monos.append(m); multis.append(mu); totals.append(m + mu)
+    mono_means_e.append(np.mean(monos)); multi_means_e.append(np.mean(multis))
+    total_sds_e.append(np.std(totals, ddof=1) if len(totals) > 1 else 0)
+x4 = np.arange(4); width4 = 0.55
+fig, ax = plt.subplots(figsize=FIGSIZE)
+b_multi = ax.bar(x4, multi_means_e, width4, color=COLOR_MULTI, edgecolor='black', linewidth=1.0)
+b_mono  = ax.bar(x4, mono_means_e, width4, bottom=multi_means_e, color=COLOR_MONO, edgecolor='black', linewidth=1.0)
+totals = [m + mu for m, mu in zip(mono_means_e, multi_means_e)]
+ax.errorbar(x4, totals, yerr=total_sds_e, fmt='none', ecolor='black', capsize=3, capthick=1.0, linewidth=1.0)
+for i in range(4):
+    if multi_means_e[i] > 1500: ax.text(i, multi_means_e[i] / 2, f'{multi_means_e[i]:.0f}', ha='center', va='center', fontsize=7, fontweight='bold', color='white')
+    if mono_means_e[i] > 1500: ax.text(i, multi_means_e[i] + mono_means_e[i] / 2, f'{mono_means_e[i]:.0f}', ha='center', va='center', fontsize=7, fontweight='bold', color='black')
+ax.set_xticks(x4); ax.set_xticklabels(list(PP_GROUPS_E.keys()), fontsize=FS_TICK)
+ax.set_ylabel('Number of phosphopeptides', fontsize=FS_LABEL); ax.set_ylim(0, 10500)
+ax.legend([b_mono, b_multi], ['Mono-phosphorylated', 'Multiply phosphorylated'], loc='upper left', fontsize=FS_LEGEND, framealpha=0.95, edgecolor='black')
+style_ax(ax); plt.tight_layout()
+panel_e = f"{PANELDIR}/panel_e.png"; plt.savefig(panel_e, **SAVE); plt.close()
+
+# ============================================================
+# Panel F
+# ============================================================
+print("Panel F: Phos selectivity")
+colors_dot = ['#9ecae1', '#3182bd', '#a1d99b', '#31a354']
+fig, ax = plt.subplots(figsize=FIGSIZE)
+for i, (label, (pattern, drop_r1)) in enumerate(PP_GROUPS_E.items()):
+    cols = cols_for(pp_quant_cols, pattern, drop_r1=drop_r1)
+    sel_per_rep = []
+    for c in cols:
+        det = detected_mask(pp[c])
+        n_total = pp.loc[det, 'PP.PIMID'].nunique()
+        n_phos = pp.loc[det & pp['is_phospho'], 'PP.PIMID'].nunique()
+        sel_per_rep.append(n_phos / n_total * 100 if n_total else 0)
+    if sel_per_rep:
+        ax.hlines(np.mean(sel_per_rep), i - 0.22, i + 0.22, color='red', linewidth=2, zorder=2)
+    ax.scatter([i] * len(sel_per_rep), sel_per_rep, s=45, color=colors_dot[i], edgecolor='black', linewidth=1, zorder=3)
+ax.axhline(80, color='gray', linestyle=':', alpha=0.6, linewidth=1)
+ax.set_xticks(np.arange(4)); ax.set_xticklabels(list(PP_GROUPS_E.keys()), fontsize=FS_TICK)
+ax.set_ylabel('Phosphopeptide selectivity (%)', fontsize=FS_LABEL)
+ax.set_ylim(0, 100); ax.set_xlim(-0.6, 3.6)
+style_ax(ax); plt.tight_layout()
+panel_f = f"{PANELDIR}/panel_f.png"; plt.savefig(panel_f, **SAVE); plt.close()
+
+# ============================================================
+# Panel G
+# ============================================================
+print("Panel G: Workflow comparison")
+def pimid_per_rep(cols):
+    out = {}
+    for c in cols:
+        rep = rep_label(c)
+        det = detected_mask(pp_phos[c])
+        out[rep] = out.get(rep, set()) | set(pp_phos.loc[det, 'PP.PIMID'].tolist())
+    return out
+def split(pset):
+    sub = pp_phos[pp_phos['PP.PIMID'].isin(pset)].drop_duplicates('PP.PIMID')
+    return (sub['n_phospho'] == 1).sum(), (sub['n_phospho'] > 1).sum()
+c8_ap_d  = pimid_per_rep(cols_for(pp_quant_cols, 'C8-Sep-PP-Aq'))
+c8_acn_d = pimid_per_rep(cols_for(pp_quant_cols, 'C8-Sep-PP-ACN'))
+gfc_ap_d = pimid_per_rep(cols_for(pp_quant_cols, 'GFC-Sep-PP-Aq', drop_r1=True))
+tim_d    = pimid_per_rep(cols_for(pp_quant_cols, 'TIM-PP'))
+shared = sorted(set(c8_ap_d) & set(c8_acn_d))
+c8_combined_d = {r: c8_ap_d[r] | c8_acn_d[r] for r in shared}
+def per_rep_df(rep_dict):
+    rows = []
+    for r, p in rep_dict.items():
+        m, mu = split(p); rows.append({'mono': m, 'multi': mu, 'total': m + mu})
+    return pd.DataFrame(rows)
+dfs_g = [per_rep_df(c8_combined_d), per_rep_df(gfc_ap_d), per_rep_df(tim_d)]
+mono_means_g  = [d['mono'].mean()  for d in dfs_g]
+multi_means_g = [d['multi'].mean() for d in dfs_g]
+total_means_g = [d['total'].mean() for d in dfs_g]
+total_sds_g   = [d['total'].std(ddof=1) for d in dfs_g]
+labels_g = ['C8\n(AP+ACN)', 'GF-C\n(AP)', 'TIMAHAC']
+fig, ax = plt.subplots(figsize=FIGSIZE)
+b_multi = ax.bar(x, multi_means_g, 0.55, color=COLOR_MULTI, edgecolor='black', linewidth=1.0)
+b_mono  = ax.bar(x, mono_means_g, 0.55, bottom=multi_means_g, color=COLOR_MONO, edgecolor='black', linewidth=1.0)
+ax.errorbar(x, total_means_g, yerr=total_sds_g, fmt='none', ecolor='black', capsize=3, capthick=1.0, linewidth=1.0)
+for i in range(3):
+    if multi_means_g[i] > 1500: ax.text(i, multi_means_g[i] / 2, f'{multi_means_g[i]:.0f}', ha='center', va='center', fontsize=7, fontweight='bold', color='white')
+    if mono_means_g[i] > 1500: ax.text(i, multi_means_g[i] + mono_means_g[i] / 2, f'{mono_means_g[i]:.0f}', ha='center', va='center', fontsize=7, fontweight='bold', color='black')
+ax.set_xticks(x); ax.set_xticklabels(labels_g, fontsize=FS_TICK)
+ax.set_ylabel('Number of phosphopeptides', fontsize=FS_LABEL); ax.set_ylim(0, 11000)
+ax.legend([b_mono, b_multi], ['Mono-phosphorylated', 'Multiply phosphorylated'], loc='upper left', fontsize=FS_LEGEND, framealpha=0.95, edgecolor='black')
+style_ax(ax); plt.tight_layout()
+panel_g = f"{PANELDIR}/panel_g.png"; plt.savefig(panel_g, **SAVE); plt.close()
+
+# ============================================================
+# Panel H
+# ============================================================
+print("Panel H: Phospho CV violin")
+cv_h = {
+    'C8\nACN':   cv_distribution(pp_phos, 'PP.PIMID', cols_for(pp_quant_cols, 'C8-Sep-PP-ACN'), min_reps=3),
+    'GF-C\nAP':  cv_distribution(pp_phos, 'PP.PIMID', cols_for(pp_quant_cols, 'GFC-Sep-PP-Aq', drop_r1=True), min_reps=3),
+    'TIMAHAC':   cv_distribution(pp_phos, 'PP.PIMID', cols_for(pp_quant_cols, 'TIM-PP'), min_reps=3),
+}
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts = ax.violinplot([cv_h[c] for c in cv_h], positions=x, showmedians=False, showextrema=False)
+for pc, color in zip(parts['bodies'], COLORS_3):
+    pc.set_facecolor(color); pc.set_alpha(0.85); pc.set_edgecolor('black'); pc.set_linewidth(1.0)
+ax.boxplot([cv_h[c] for c in cv_h], positions=x, widths=0.18, patch_artist=False, showfliers=False,
+           medianprops=dict(color='red', linewidth=2), whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+for i, c in enumerate(cv_h):
+    ax.text(i, -3, f'{np.median(cv_h[c]):.1f}%', ha='center', va='center', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(list(cv_h.keys()), fontsize=FS_TICK)
+ax.set_ylabel('Phosphopeptide CV (%)', fontsize=FS_LABEL)
+ax.set_ylim(-5, 80); ax.set_yticks([0, 20, 40, 60, 80])
+style_ax(ax); plt.tight_layout()
+panel_h = f"{PANELDIR}/panel_h.png"; plt.savefig(panel_h, **SAVE); plt.close()
+
+# ============================================================
+# Assemble Figure 5 (2x4) — transparent canvas
+# ============================================================
+print("\nAssembling Figure 5...")
+fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+fig.patch.set_alpha(0.0)
+axes = axes.flatten()
+panels = [(panel_a, 'A'), (panel_b, 'B'), (panel_c, 'C'), (panel_d, 'D'),
+          (panel_e, 'E'), (panel_f, 'F'), (panel_g, 'G'), (panel_h, 'H')]
+for ax, (path, letter) in zip(axes, panels):
+    img = mpimg.imread(path)
+    ax.imshow(img); ax.axis('off')
+    ax.text(-0.08, 1.05, letter, transform=ax.transAxes, fontsize=18, fontweight='bold', ha='left', va='bottom')
+plt.tight_layout(pad=0.5)
+out_path = f"{OUTDIR}/Figure5_Phase3_transparent.png"
+plt.savefig(out_path, dpi=DPI_ASSEMBLED, bbox_inches='tight', transparent=True)
+plt.close()
+print(f"Saved {out_path}")
