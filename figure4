@@ -1,0 +1,462 @@
+"""
+Figure 4: HILIC loading optimization (Phase 2) — CORRECTED, transparent background.
+
+Single-tip GF-C tandem IMAC-HILIC at 4 HILIC resin loadings (10 / 5 / 2 / 1 mg).
+Self-contained. 8 panels in 2x4 layout.
+
+CORRECTIONS vs. the earlier version:
+  1. GP intensity columns selected with str.startswith(prefix), NOT `prefix in col`.
+     `'10_10_GP' in col` also matched the FragPipe decoy columns
+     'REV10_10_GP_*', inflating the 10 mg condition with reverse (false) hits.
+     startswith() excludes them. Only the 10 mg condition was affected because
+     its prefix is a substring of the REV-prefixed decoy column names.
+  2. GP intensity columns exclude MaxLFQ columns (`'MaxLFQ' not in col`).
+     Including them double-counts each peptide (one raw + one MaxLFQ column),
+     inflating per-replicate detection.
+  3. GP-fraction composition (Panel B) uses the deduction method:
+       - N-glycopeptides : has_glyco
+       - Phosphopeptides : has_phospho AND NOT has_glyco
+       - Other           : everything else (Total - N-glyco - phospho)
+     'Other' absorbs both truly unmodified peptides and peptides bearing only
+     other modifications (e.g. oxidation). The three categories sum to 100%.
+     Counting is at the deduplicated (Peptide Sequence + glycan mass) level.
+
+Output background is transparent (RGBA) for overlay on slides / posters.
+
+Data:
+    1150375-1150394_HILIC_beads-PP_A227_20260410_Peptide_Precursor_Report.csv  (PP fraction, Spectronaut)
+    1150410-1150429_HILIC_beads_test_GP_A227_combined_modified_peptide.tsv     (GP fraction, FragPipe)
+
+Panels (2x4):
+    A: N-glycopeptide count bar
+    B: GP fraction composition (N-glyco / Phos / Other) %
+    C: Glyco CV grouped bar (Total / CV<20% / CV<10%)
+    D: Glycan classification stacked %  (5-class incl. Hybrid)
+    E: Saccharide count violin
+    F: Phosphopeptide count stacked (mono / multi)
+    G: PP fraction selectivity stacked %
+    H: Phosphopeptide CV violin
+"""
+import os
+import re
+import warnings
+from itertools import product
+
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import matplotlib.patches as mpatches
+
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+
+# ============================================================
+# Configuration
+# ============================================================
+PP_PATH = "/mnt/user-data/uploads/1150375-1150394_HILIC_beads-PP_A227_20260410_Peptide_Precursor_Report.csv"
+GP_PATH = "/mnt/user-data/uploads/1150410-1150429_HILIC_beads_test_GP_A227_combined_modified_peptide.tsv"
+OUTDIR = "/mnt/user-data/outputs"
+PANELDIR = "/home/claude/fig4_panels"
+os.makedirs(OUTDIR, exist_ok=True)
+os.makedirs(PANELDIR, exist_ok=True)
+
+DPI_PANEL = 600
+DPI_ASSEMBLED = 600
+TRANSPARENT = True              # transparent background for all outputs
+FIGSIZE = (3, 3)
+FS_LABEL, FS_TICK, FS_LEGEND, FS_VALUE, FS_N = 10, 9, 6, 8, 6
+
+COLORS = ['#AADCFA', '#78A5C8', '#8CB9B9', '#C8D2E6']       # 10 / 5 / 2 / 1 mg
+COLOR_MONO, COLOR_MULTI = '#87CEFA', '#4682B4'
+COLOR_GLYCO, COLOR_PHOS, COLOR_OTHER = '#F4A582', '#5B9BD5', '#D9D9D9'
+
+CONDITIONS = {
+    '10 mg': {'pp_pat': '_10-10-PP-', 'gp_pre': '10_10_GP'},
+    '5 mg':  {'pp_pat': '_10-5-PP-',  'gp_pre': '10_5_GP'},
+    '2 mg':  {'pp_pat': '_10-2-PP-',  'gp_pre': '10_2_GP'},
+    '1 mg':  {'pp_pat': '_10-1-PP-',  'gp_pre': '10_1_GP'},
+}
+COND_LABELS = ['10', '5', '2', '1']
+SAVE = dict(dpi=DPI_PANEL, transparent=TRANSPARENT, bbox_inches='tight')
+
+# ============================================================
+# Helpers
+# ============================================================
+def detected_mask(s):
+    s = pd.to_numeric(s, errors='coerce')
+    return s.notna() & (s > 0)
+
+def style_ax(ax):
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5); spine.set_color('black')
+    ax.tick_params(width=1.5, length=4, labelsize=FS_TICK)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.set_axisbelow(True)
+    ax.set_facecolor('none')      # transparent panel interior
+
+def cv_distribution(df, key_col, cond_cols, min_reps=3):
+    sub = df[[key_col] + list(cond_cols)].copy()
+    for c in cond_cols:
+        sub[c] = pd.to_numeric(sub[c], errors='coerce')
+    g = sub.groupby(key_col)[list(cond_cols)].max()
+    valid = g.where(g > 0)
+    keep = valid[valid.notna().sum(axis=1) >= min_reps]
+    means = keep.mean(axis=1, skipna=True); stds = keep.std(axis=1, skipna=True)
+    return (stds / means * 100).dropna().values
+
+def gp_cols(gp_int_cols, prefix):
+    """Replicate intensity columns for one condition.
+    startswith() avoids matching REV<prefix> decoy columns."""
+    return [c for c in gp_int_cols if c.startswith(prefix)]
+
+# ---- glycan composition library ----
+MASS = {'HexNAc': 203.0794, 'Hex': 162.0528, 'dHex': 146.0579,
+        'Pent': 132.0423, 'NeuAc': 291.0954}
+LIB = {}
+for hn, hx, fc, px, na in product(range(9), range(13), range(4), range(4), range(5)):
+    if hn == 0 and hx == 0:
+        continue
+    LIB[(hn, hx, fc, px, na)] = (hn*MASS['HexNAc'] + hx*MASS['Hex'] + fc*MASS['dHex']
+                                 + px*MASS['Pent'] + na*MASS['NeuAc'])
+LIB_ITEMS = list(LIB.items())
+
+def parse_glycan_mass(mods):
+    if pd.isna(mods): return None
+    m = re.findall(r'N\(([\d.]+)\)', str(mods))
+    return float(m[0]) if m else None
+
+def match_composition(mass, tol=0.05):
+    best, best_err = None, tol
+    for comp, cm in LIB_ITEMS:
+        e = abs(cm - mass)
+        if e < best_err:
+            best_err = e; best = comp
+    return best
+
+def classify_5class(comp):
+    """5-class scheme (Truncated / Paucimannose / High mannose / Hybrid / Complex)."""
+    if comp is None: return 'Unknown'
+    hn, hx, fc, px, na = comp
+    if hn < 2: return 'Truncated'
+    if hn == 2 and hx <= 3 and na == 0: return 'Paucimannose'
+    if hn == 2 and hx >= 4 and fc == 0 and px == 0 and na == 0: return 'High mannose'
+    if hn >= 3 and hx <= hn + 1: return 'Complex'
+    if hn >= 3 and hx > hn + 1: return 'Hybrid'
+    return 'Unknown'
+
+# ============================================================
+# Load PP fraction (Spectronaut)
+# ============================================================
+print("Loading PP fraction...")
+pp = pd.read_csv(PP_PATH, low_memory=False)
+pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
+pp['n_phospho'] = pp['PP.PIMID'].str.count(r'\[Phospho \(STY\)\]')
+pp_phos = pp[pp['is_phospho']].copy()
+pp_quant_cols = [c for c in pp.columns if 'Label-Free Quant' in c]
+print(f"  PP rows={len(pp)}, phos={len(pp_phos)}, quant cols={len(pp_quant_cols)}")
+
+# ============================================================
+# Load GP fraction (FragPipe)
+# ============================================================
+print("Loading GP fraction...")
+gp = pd.read_csv(GP_PATH, sep='\t', low_memory=False)
+gp['has_glyco']   = gp['Assigned Modifications'].str.contains(r'N\(', na=False)
+gp['has_phospho'] = gp['Assigned Modifications'].str.contains(r'79\.9663', na=False)
+gp['no_mod']      = gp['Assigned Modifications'].isna() | (gp['Assigned Modifications'] == '')
+
+gp_glyco = gp[gp['has_glyco']].copy()
+gp_glyco['glycan_mass'] = gp_glyco['Assigned Modifications'].apply(parse_glycan_mass)
+gp_glyco['composition'] = gp_glyco['glycan_mass'].apply(
+    lambda m: match_composition(m) if m is not None else None)
+gp_glyco['glycan_class'] = gp_glyco['composition'].apply(classify_5class)
+gp_glyco['saccharides']  = gp_glyco['composition'].apply(lambda c: sum(c) if c else None)
+gp_glyco['glyco_key'] = (gp_glyco['Peptide Sequence'].astype(str) + '|'
+                          + gp_glyco['glycan_mass'].round(2).astype(str))
+
+# CORRECT intensity columns: real samples only (no MaxLFQ, no Spectral, no REV decoy)
+gp_int_cols = [c for c in gp.columns
+               if c.endswith(' Intensity') and 'MaxLFQ' not in c and 'Spectral' not in c]
+print(f"  GP rows={len(gp)}, glyco={len(gp_glyco)}, intensity cols={len(gp_int_cols)}")
+
+x = np.arange(len(CONDITIONS)); width = 0.6
+
+# ============================================================
+# Panel A: N-glycopeptide count bar
+# ============================================================
+print("\nPanel A: N-glycopeptide count")
+glyco_per_rep = {c: [] for c in CONDITIONS}
+for cname, info in CONDITIONS.items():
+    for col in gp_cols(gp_int_cols, info['gp_pre']):
+        g = gp_glyco.groupby('glyco_key')[col].max()
+        glyco_per_rep[cname].append(detected_mask(g).sum())
+means = [np.mean(glyco_per_rep[c]) for c in CONDITIONS]
+sds   = [np.std(glyco_per_rep[c], ddof=1) for c in CONDITIONS]
+fig, ax = plt.subplots(figsize=FIGSIZE)
+ax.bar(x, means, width, color=COLORS, edgecolor='black', linewidth=1.0)
+ax.errorbar(x, means, yerr=sds, fmt='none', ecolor='black', capsize=3, capthick=1.0, linewidth=1.0)
+for i, m in enumerate(means):
+    if m > 200:
+        ax.text(i, m * 0.4, f'{m:.0f}', ha='center', va='center', fontsize=FS_VALUE, fontweight='bold')
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Number of N-glycopeptides', fontsize=FS_LABEL)
+style_ax(ax); plt.tight_layout()
+panel_a = f"{PANELDIR}/panel_a.png"; plt.savefig(panel_a, **SAVE); plt.close()
+
+# ============================================================
+# Panel B: GP fraction composition (N-glyco / Phos / Other) %
+# ============================================================
+print("Panel B: GP fraction composition")
+gp_cat = gp.copy()
+# Deduction method: everything that is not N-glyco or phospho-only becomes 'Other'.
+# 'Other' therefore absorbs truly unmodified peptides AND peptides bearing only
+# other modifications (e.g. oxidation). The three categories sum to 100%.
+gp_cat['cat'] = 'Other'
+gp_cat.loc[gp_cat['has_phospho'] & ~gp_cat['has_glyco'], 'cat'] = 'Phosphopeptides'
+gp_cat.loc[gp_cat['has_glyco'], 'cat'] = 'N-glycopeptides'
+gp_cat['dedup_key'] = (gp_cat['Peptide Sequence'].astype(str) + '|'
+                       + gp_cat['Assigned Modifications'].apply(
+                           lambda s: parse_glycan_mass(s) or 0.0).round(2).astype(str))
+cats = ['N-glycopeptides', 'Phosphopeptides', 'Other']
+cat_colors = {'N-glycopeptides': COLOR_GLYCO, 'Phosphopeptides': COLOR_PHOS, 'Other': COLOR_OTHER}
+pcts = {cat: [] for cat in cats}
+for cname, info in CONDITIONS.items():
+    rep_pcts = {cat: [] for cat in cats}
+    for col in gp_cols(gp_int_cols, info['gp_pre']):
+        det = gp_cat[detected_mask(gp_cat[col])].drop_duplicates('dedup_key')
+        cat_counts = {cat: int((det['cat'] == cat).sum()) for cat in cats}
+        n_total = sum(cat_counts.values())   # denominator = total (all three categories)
+        if n_total == 0:
+            for cat in cats: rep_pcts[cat].append(0)
+            continue
+        for cat in cats:
+            rep_pcts[cat].append(cat_counts[cat] / n_total * 100)
+    for cat in cats:
+        pcts[cat].append(np.mean(rep_pcts[cat]))
+fig, ax = plt.subplots(figsize=FIGSIZE)
+bottom = np.zeros(len(CONDITIONS))
+for cat in cats:
+    vals = pcts[cat]
+    ax.bar(x, vals, width, bottom=bottom, color=cat_colors[cat], edgecolor='black', linewidth=1.0, label=cat)
+    for i, v in enumerate(vals):
+        if v > 4:
+            color = 'white' if cat == 'Phosphopeptides' else 'black'
+            ax.text(i, bottom[i] + v / 2, f'{v:.0f}%', ha='center', va='center',
+                    fontsize=FS_VALUE, fontweight='bold', color=color)
+    bottom += np.array(vals)
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Proportion (%)', fontsize=FS_LABEL); ax.set_ylim(0, 100)
+ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.02), ncol=2, fontsize=FS_LEGEND, frameon=False)
+style_ax(ax); plt.tight_layout()
+panel_b = f"{PANELDIR}/panel_b.png"; plt.savefig(panel_b, **SAVE); plt.close()
+
+# ============================================================
+# Panel C: Glyco CV grouped bar (Total / CV<20% / CV<10%)
+# ============================================================
+print("Panel C: Glyco CV grouped bar")
+totals_c, n_cv20, n_cv10 = [], [], []
+for cname, info in CONDITIONS.items():
+    icols = gp_cols(gp_int_cols, info['gp_pre'])
+    cvs = cv_distribution(gp_glyco, 'glyco_key', icols, min_reps=3)
+    totals_c.append(len(cvs)); n_cv20.append(int((cvs < 20).sum())); n_cv10.append(int((cvs < 10).sum()))
+bw = 0.27
+fig, ax = plt.subplots(figsize=FIGSIZE)
+for i in range(len(CONDITIONS)):
+    base = COLORS[i]
+    ax.bar(i - bw, totals_c[i], bw, color=base, edgecolor='black', linewidth=1.0, alpha=0.4)
+    ax.bar(i,      n_cv20[i],   bw, color=base, edgecolor='black', linewidth=1.0, alpha=0.7)
+    ax.bar(i + bw, n_cv10[i],   bw, color=base, edgecolor='black', linewidth=1.0, alpha=1.0)
+ax.legend(handles=[
+    mpatches.Patch(facecolor='gray', alpha=0.4, edgecolor='black', label='Total'),
+    mpatches.Patch(facecolor='gray', alpha=0.7, edgecolor='black', label='CV < 20%'),
+    mpatches.Patch(facecolor='gray', alpha=1.0, edgecolor='black', label='CV < 10%'),
+], loc='upper left', fontsize=FS_LEGEND, framealpha=0.95)
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Number of N-glycopeptides', fontsize=FS_LABEL)
+style_ax(ax); plt.tight_layout()
+panel_c = f"{PANELDIR}/panel_c.png"; plt.savefig(panel_c, **SAVE); plt.close()
+
+# ============================================================
+# Panel D: Glycan classification stacked % (5-class incl. Hybrid)
+# ============================================================
+print("Panel D: Glycan classification")
+classes = ['Truncated', 'Paucimannose', 'High mannose', 'Hybrid', 'Complex']
+class_colors = {'Truncated': '#EF9A9A', 'Paucimannose': '#F4A784',
+                'High mannose': '#FFD54F', 'Hybrid': '#81C784', 'Complex': '#81D4FA'}
+class_pcts = {cls: [] for cls in classes}
+for cname, info in CONDITIONS.items():
+    icols = gp_cols(gp_int_cols, info['gp_pre'])
+    sub = gp_glyco[gp_glyco['composition'].notna()].copy()
+    n_det = pd.DataFrame({c: detected_mask(sub[c]).astype(int) for c in icols}).sum(axis=1)
+    keep = sub[n_det >= 3].drop_duplicates('glyco_key')
+    counts = keep['glycan_class'].value_counts()
+    total = sum(counts.get(cls, 0) for cls in classes)
+    for cls in classes:
+        class_pcts[cls].append(counts.get(cls, 0) / total * 100 if total else 0)
+fig, ax = plt.subplots(figsize=FIGSIZE)
+bottom = np.zeros(len(CONDITIONS))
+for cls in classes:
+    vals = class_pcts[cls]
+    lbl = '_nolegend_' if cls == 'Hybrid' else cls
+    ax.bar(x, vals, width, bottom=bottom, color=class_colors[cls], edgecolor='black', linewidth=1.0, label=lbl)
+    for i, v in enumerate(vals):
+        if v > 4:
+            ax.text(i, bottom[i] + v / 2, f'{v:.0f}%', ha='center', va='center',
+                    fontsize=FS_VALUE, fontweight='bold', color='black')
+    bottom += np.array(vals)
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Proportion (%)', fontsize=FS_LABEL); ax.set_ylim(0, 105)
+ax.legend(loc='upper center', bbox_to_anchor=(0.5, 1.20), ncol=2,
+          fontsize=FS_LEGEND, frameon=False, columnspacing=0.8)
+style_ax(ax); plt.tight_layout()
+panel_d = f"{PANELDIR}/panel_d.png"; plt.savefig(panel_d, **SAVE); plt.close()
+
+# ============================================================
+# Panel E: Saccharide count violin
+# ============================================================
+print("Panel E: Saccharide count")
+sac_data = {}
+for cname, info in CONDITIONS.items():
+    icols = gp_cols(gp_int_cols, info['gp_pre'])
+    sub = gp_glyco[gp_glyco['composition'].notna()].copy()
+    n_det = pd.DataFrame({c: detected_mask(sub[c]).astype(int) for c in icols}).sum(axis=1)
+    keep = sub[n_det >= 3].drop_duplicates('glyco_key')
+    sac_data[cname] = keep['saccharides'].dropna().astype(int).tolist()
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts = ax.violinplot([sac_data[c] for c in CONDITIONS], positions=x, showmedians=False, showextrema=False)
+for pc, color in zip(parts['bodies'], COLORS):
+    pc.set_facecolor(color); pc.set_alpha(0.85); pc.set_edgecolor('black'); pc.set_linewidth(1.0)
+ax.boxplot([sac_data[c] for c in CONDITIONS], positions=x, widths=0.18, patch_artist=False, showfliers=False,
+           medianprops=dict(color='red', linewidth=2), whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+for i, c in enumerate(CONDITIONS):
+    if sac_data[c]:
+        med = int(np.median(sac_data[c])); n = len(sac_data[c])
+        ax.text(i, med + 0.3, str(med), ha='center', va='bottom', fontsize=FS_VALUE, fontweight='bold')
+        ax.text(i, 0.5, f'n={n}', ha='center', va='center', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Number of saccharides', fontsize=FS_LABEL); ax.set_ylim(0, 14)
+style_ax(ax); plt.tight_layout()
+panel_e = f"{PANELDIR}/panel_e.png"; plt.savefig(panel_e, **SAVE); plt.close()
+
+# ============================================================
+# Panel F: Phosphopeptide count stacked (mono / multi)
+# ============================================================
+print("Panel F: Phosphopeptide count stacked")
+mono_per_rep  = {c: [] for c in CONDITIONS}
+multi_per_rep = {c: [] for c in CONDITIONS}
+for cname, info in CONDITIONS.items():
+    rep_cols = [c for c in pp_quant_cols if info['pp_pat'] in c]
+    for col in rep_cols:
+        sub = pp_phos[detected_mask(pp_phos[col])].drop_duplicates('PP.PIMID')
+        mono_per_rep[cname].append((sub['n_phospho'] == 1).sum())
+        multi_per_rep[cname].append((sub['n_phospho'] > 1).sum())
+mono_means_f  = [np.mean(mono_per_rep[c])  for c in CONDITIONS]
+multi_means_f = [np.mean(multi_per_rep[c]) for c in CONDITIONS]
+total_means_f = [m + mu for m, mu in zip(mono_means_f, multi_means_f)]
+total_sds_f   = [np.std([mono_per_rep[c][i] + multi_per_rep[c][i]
+                         for i in range(len(mono_per_rep[c]))], ddof=1) for c in CONDITIONS]
+fig, ax = plt.subplots(figsize=FIGSIZE)
+b_multi = ax.bar(x, multi_means_f, width, color=COLOR_MULTI, edgecolor='black', linewidth=1.0)
+b_mono  = ax.bar(x, mono_means_f, width, bottom=multi_means_f, color=COLOR_MONO, edgecolor='black', linewidth=1.0)
+ax.errorbar(x, total_means_f, yerr=total_sds_f, fmt='none', ecolor='black', capsize=3, capthick=1.0, linewidth=1.0)
+for i in range(len(CONDITIONS)):
+    if multi_means_f[i] > 200:
+        ax.text(i, multi_means_f[i] / 2, f'{multi_means_f[i]:.0f}',
+                ha='center', va='center', fontsize=7, fontweight='bold', color='white')
+    if mono_means_f[i] > 200:
+        ax.text(i, multi_means_f[i] + mono_means_f[i] / 2, f'{mono_means_f[i]:.0f}',
+                ha='center', va='center', fontsize=7, fontweight='bold', color='black')
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Number of phosphopeptides', fontsize=FS_LABEL)
+ax.set_ylim(0, max(total_means_f) * 1.2)
+ax.legend([b_mono, b_multi], ['Mono-phosphorylated', 'Multiply phosphorylated'],
+          loc='upper left', fontsize=FS_LEGEND, framealpha=0.95, edgecolor='black')
+style_ax(ax); plt.tight_layout()
+panel_f = f"{PANELDIR}/panel_f.png"; plt.savefig(panel_f, **SAVE); plt.close()
+
+# ============================================================
+# Panel G: PP fraction selectivity stacked %
+# ============================================================
+print("Panel G: PP fraction selectivity")
+phos_n_per_rep    = {c: [] for c in CONDITIONS}
+nonphos_n_per_rep = {c: [] for c in CONDITIONS}
+for cname, info in CONDITIONS.items():
+    rep_cols = [c for c in pp_quant_cols if info['pp_pat'] in c]
+    for col in rep_cols:
+        det = detected_mask(pp[col])
+        n_total = pp.loc[det, 'PP.PIMID'].nunique()
+        n_phos  = pp.loc[det & pp['is_phospho'], 'PP.PIMID'].nunique()
+        phos_n_per_rep[cname].append(n_phos)
+        nonphos_n_per_rep[cname].append(n_total - n_phos)
+phos_means_g    = [np.mean(phos_n_per_rep[c])    for c in CONDITIONS]
+nonphos_means_g = [np.mean(nonphos_n_per_rep[c]) for c in CONDITIONS]
+total_means_g   = [p + n for p, n in zip(phos_means_g, nonphos_means_g)]
+total_sds_g     = [np.std([phos_n_per_rep[c][i] + nonphos_n_per_rep[c][i]
+                            for i in range(len(phos_n_per_rep[c]))], ddof=1) for c in CONDITIONS]
+fig, ax = plt.subplots(figsize=FIGSIZE)
+b_phos = ax.bar(x, phos_means_g, width, color=COLOR_MONO, edgecolor='black', linewidth=1.0)
+b_non  = ax.bar(x, nonphos_means_g, width, bottom=phos_means_g, color=COLOR_OTHER, edgecolor='black', linewidth=1.0)
+ax.errorbar(x, total_means_g, yerr=total_sds_g, fmt='none', ecolor='black', capsize=3, capthick=1.0, linewidth=1.0)
+for i in range(len(CONDITIONS)):
+    p, n = phos_means_g[i], nonphos_means_g[i]
+    pct = p / (p + n) * 100 if (p + n) else 0
+    ax.text(i, p / 2, f'{pct:.0f}%', ha='center', va='center', fontsize=FS_VALUE, fontweight='bold', color='black')
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Peptides in phospho fraction', fontsize=FS_LABEL)
+ax.legend([b_phos, b_non], ['Phosphopeptides', 'Non-phosphopeptides'],
+          loc='upper left', fontsize=FS_LEGEND, framealpha=0.95, edgecolor='black')
+style_ax(ax); plt.tight_layout()
+panel_g = f"{PANELDIR}/panel_g.png"; plt.savefig(panel_g, **SAVE); plt.close()
+
+# ============================================================
+# Panel H: Phosphopeptide CV violin
+# ============================================================
+print("Panel H: Phosphopeptide CV violin")
+cv_phos = {}
+for cname, info in CONDITIONS.items():
+    rep_cols = [c for c in pp_quant_cols if info['pp_pat'] in c]
+    cv_phos[cname] = cv_distribution(pp_phos, 'PP.PIMID', rep_cols, min_reps=3)
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts = ax.violinplot([cv_phos[c] for c in CONDITIONS], positions=x, showmedians=False, showextrema=False)
+for pc, color in zip(parts['bodies'], COLORS):
+    pc.set_facecolor(color); pc.set_alpha(0.85); pc.set_edgecolor('black'); pc.set_linewidth(1.0)
+ax.boxplot([cv_phos[c] for c in CONDITIONS], positions=x, widths=0.18, patch_artist=False, showfliers=False,
+           medianprops=dict(color='red', linewidth=2), whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+for i, c in enumerate(CONDITIONS):
+    med = np.median(cv_phos[c])
+    ax.text(i, -3, f'{med:.1f}%', ha='center', va='center', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Phosphopeptide CV (%)', fontsize=FS_LABEL)
+ax.set_ylim(-5, 80); ax.set_yticks([0, 20, 40, 60, 80])
+style_ax(ax); plt.tight_layout()
+panel_h = f"{PANELDIR}/panel_h.png"; plt.savefig(panel_h, **SAVE); plt.close()
+
+# ============================================================
+# Assemble Figure 4 (2x4) — transparent canvas
+# ============================================================
+print("\nAssembling Figure 4...")
+fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+fig.patch.set_alpha(0.0)
+axes = axes.flatten()
+panels = [(panel_a, 'A'), (panel_b, 'B'), (panel_c, 'C'), (panel_d, 'D'),
+          (panel_e, 'E'), (panel_f, 'F'), (panel_g, 'G'), (panel_h, 'H')]
+for ax, (path, letter) in zip(axes, panels):
+    img = mpimg.imread(path)
+    ax.imshow(img); ax.axis('off')
+    ax.text(-0.08, 1.05, letter, transform=ax.transAxes,
+            fontsize=18, fontweight='bold', ha='left', va='bottom')
+plt.tight_layout(pad=0.5)
+out_path = f"{OUTDIR}/Figure4_HILIC_loading_transparent.png"
+plt.savefig(out_path, dpi=DPI_ASSEMBLED, bbox_inches='tight', transparent=True)
+plt.close()
+print(f"Saved {out_path}")
