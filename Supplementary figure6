@@ -1,0 +1,149 @@
+"""
+Supplementary Figure 6: Phosphopeptide physicochemical properties.
+Compares peptide length and GRAVY (hydropathy) score across HILIC loadings.
+TRANSPARENT background, 600 DPI. 2 panels in 1x2 layout.
+Data:
+    1150375-1150394_HILIC_beads-PP_A227_20260410_Peptide_Precursor_Report.csv
+Panels:
+    A: Peptide length violin   (bottom label = median length, aa)
+    B: GRAVY score violin      (bottom label = median GRAVY score)
+"""
+import os
+import re
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+PP_PATH = "/mnt/user-data/uploads/1150375-1150394_HILIC_beads-PP_A227_20260410_Peptide_Precursor_Report.csv"
+OUTDIR = "/mnt/user-data/outputs"
+PANELDIR = "/home/claude/sf6_panels"
+os.makedirs(OUTDIR, exist_ok=True)
+os.makedirs(PANELDIR, exist_ok=True)
+DPI_PANEL = 600; DPI_ASSEMBLED = 600
+TRANSPARENT = True
+FIGSIZE = (3, 3)
+FS_LABEL, FS_TICK, FS_N = 10, 9, 6
+COLORS = ['#AADCFA', '#78A5C8', '#8CB9B9', '#C8D2E6']
+SAVE = dict(dpi=DPI_PANEL, transparent=TRANSPARENT, bbox_inches='tight')
+CONDITIONS = {
+    '10 mg': '_10-10-PP-',
+    '5 mg':  '_10-5-PP-',
+    '2 mg':  '_10-2-PP-',
+    '1 mg':  '_10-1-PP-',
+}
+GRAVY_TABLE = {
+    'A': 1.8, 'C': 2.5, 'D': -3.5, 'E': -3.5, 'F': 2.8, 'G': -0.4, 'H': -3.2,
+    'I': 4.5, 'K': -3.9, 'L': 3.8, 'M': 1.9, 'N': -3.5, 'P': -1.6, 'Q': -3.5,
+    'R': -4.5, 'S': -0.8, 'T': -0.7, 'V': 4.2, 'W': -0.9, 'Y': -1.3
+}
+def detected_mask(s):
+    s = pd.to_numeric(s, errors='coerce')
+    return s.notna() & (s > 0)
+def style_ax(ax):
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5); spine.set_color('black')
+    ax.tick_params(width=1.5, length=4, labelsize=FS_TICK)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.set_axisbelow(True)
+    ax.set_facecolor('none')
+def compute_gravy(seq):
+    seq = re.sub(r'[^A-Z]', '', str(seq))
+    if not seq: return None
+    return sum(GRAVY_TABLE.get(a, 0) for a in seq) / len(seq)
+# ============================================================
+# Load and annotate
+# ============================================================
+print("Loading data...")
+pp = pd.read_csv(PP_PATH, low_memory=False)
+pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
+pp_phos = pp[pp['is_phospho']].copy()
+pp_quant_cols = [c for c in pp.columns if 'Label-Free Quant' in c]
+pp_phos['pep_length'] = pp_phos['PEP.StrippedSequence'].str.len()
+pp_phos['gravy'] = pp_phos['PEP.StrippedSequence'].apply(compute_gravy)
+# ============================================================
+# Per-condition: PIMIDs detected in >= 3 of 4 reps
+# ============================================================
+length_data = {}
+gravy_data = {}
+n_per_cond = {}
+for cname, pat in CONDITIONS.items():
+    rep_cols = [c for c in pp_quant_cols if pat in c]
+    detection_count = pd.Series(0, index=pp_phos.index)
+    for col in rep_cols:
+        detection_count = detection_count + detected_mask(pp_phos[col]).astype(int)
+    keep = pp_phos[detection_count >= 3].drop_duplicates('PP.PIMID')
+    length_data[cname] = keep['pep_length'].dropna().astype(int).tolist()
+    gravy_data[cname] = keep['gravy'].dropna().tolist()
+    n_per_cond[cname] = len(keep)
+x = np.arange(len(CONDITIONS))
+# ============================================================
+# Panel A: Peptide length violin   (bottom label = median length)
+# ============================================================
+print("Panel A: Peptide length")
+fig, ax = plt.subplots(figsize=FIGSIZE)
+data_lists = [length_data[c] for c in CONDITIONS]
+parts = ax.violinplot(data_lists, positions=x, widths=0.75,
+                       showmeans=False, showmedians=False, showextrema=False)
+for i, pc in enumerate(parts['bodies']):
+    pc.set_facecolor(COLORS[i]); pc.set_edgecolor('black'); pc.set_linewidth(1.0); pc.set_alpha(0.9)
+ax.boxplot(data_lists, positions=x, widths=0.25, patch_artist=True,
+           showfliers=False,
+           medianprops=dict(color='red', linewidth=1.5),
+           boxprops=dict(facecolor='white', edgecolor='black', linewidth=1.0),
+           whiskerprops=dict(color='black', linewidth=1.0),
+           capprops=dict(color='black', linewidth=1.0))
+for i, c in enumerate(CONDITIONS):
+    med = np.median(length_data[c])
+    ax.text(i, 4, f'{med:.0f}', ha='center', va='bottom', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(['10', '5', '2', '1'], fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Peptide length (aa)', fontsize=FS_LABEL)
+ax.set_ylim(3, 55)
+style_ax(ax); plt.tight_layout()
+panel_a = f"{PANELDIR}/panel_a.png"; plt.savefig(panel_a, **SAVE); plt.close()
+# ============================================================
+# Panel B: GRAVY score violin   (bottom label = median GRAVY)
+# ============================================================
+print("Panel B: GRAVY score")
+fig, ax = plt.subplots(figsize=FIGSIZE)
+data_lists = [gravy_data[c] for c in CONDITIONS]
+parts = ax.violinplot(data_lists, positions=x, widths=0.75,
+                       showmeans=False, showmedians=False, showextrema=False)
+for i, pc in enumerate(parts['bodies']):
+    pc.set_facecolor(COLORS[i]); pc.set_edgecolor('black'); pc.set_linewidth(1.0); pc.set_alpha(0.9)
+ax.boxplot(data_lists, positions=x, widths=0.25, patch_artist=True,
+           showfliers=False,
+           medianprops=dict(color='red', linewidth=1.5),
+           boxprops=dict(facecolor='white', edgecolor='black', linewidth=1.0),
+           whiskerprops=dict(color='black', linewidth=1.0),
+           capprops=dict(color='black', linewidth=1.0))
+for i, c in enumerate(CONDITIONS):
+    med = np.median(gravy_data[c])
+    ax.text(i, -3.6, f'{med:.2f}', ha='center', va='bottom', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(['10', '5', '2', '1'], fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('GRAVY score', fontsize=FS_LABEL)
+ax.set_ylim(-3.7, 1.5)
+style_ax(ax); plt.tight_layout()
+panel_b = f"{PANELDIR}/panel_b.png"; plt.savefig(panel_b, **SAVE); plt.close()
+# ============================================================
+# Assemble (1x2) — transparent
+# ============================================================
+print("\nAssembling SuppFig 6...")
+fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+fig.patch.set_alpha(0.0)
+for ax, (path, letter) in zip(axes, [(panel_a, 'A'), (panel_b, 'B')]):
+    img = mpimg.imread(path)
+    ax.imshow(img); ax.axis('off')
+    ax.text(-0.08, 1.05, letter, transform=ax.transAxes,
+            fontsize=18, fontweight='bold', ha='left', va='bottom')
+plt.tight_layout(pad=0.5)
+out_path = f"{OUTDIR}/SuppFig6_physicochem_transparent.png"
+plt.savefig(out_path, dpi=DPI_ASSEMBLED, bbox_inches='tight', transparent=True)
+plt.close()
+print(f"Saved {out_path}")
