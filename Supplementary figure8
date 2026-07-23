@@ -1,0 +1,174 @@
+"""
+Supplementary Figure 8: GF-C AP-elution quantification mechanism.
+TRANSPARENT background, 600 DPI. 2 panels in 1x2 layout.
+Tests two hypotheses for the higher mono-phos CV in GFC AP vs C8 ACN:
+  Panel A: Mono-phos has higher CV than multi-phos in GFC AP only
+  Panel B: Phospho peptides leaked into GP fraction have similar CV in AP
+Detection: >=3 of N replicates with intensity > 0.
+Bottom labels are median CV (%).
+Data:
+    Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv
+    Exp3-GP_combined_modified_peptide.tsv
+"""
+import os
+import re
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+from matplotlib.patches import Patch
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+PP_PATH = "/mnt/user-data/uploads/Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv"
+GP_PATH = "/mnt/user-data/uploads/Exp3-GP_combined_modified_peptide.tsv"
+OUTDIR = "/mnt/user-data/outputs"
+PANELDIR = "/home/claude/sf8_panels"
+os.makedirs(OUTDIR, exist_ok=True)
+os.makedirs(PANELDIR, exist_ok=True)
+DPI_PANEL = 600; DPI_ASSEMBLED = 600
+TRANSPARENT = True
+FIGSIZE = (3, 3)
+FS_LABEL, FS_TICK, FS_LEGEND, FS_VALUE, FS_N = 10, 9, 6, 8, 6
+SAVE = dict(dpi=DPI_PANEL, transparent=TRANSPARENT, bbox_inches='tight')
+def detected_mask(s):
+    s = pd.to_numeric(s, errors='coerce')
+    return s.notna() & (s > 0)
+def style_ax(ax):
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5); spine.set_color('black')
+    ax.tick_params(width=1.5, length=4, labelsize=FS_TICK)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.set_axisbelow(True)
+    ax.set_facecolor('none')
+def cols_for(quant_cols, pat, drop_r1=False):
+    cols = [c for c in quant_cols if pat in c]
+    if drop_r1: cols = [c for c in cols if '-R1_' not in c]
+    return cols
+# ============================================================
+# Load
+# ============================================================
+print("Loading data...")
+pp = pd.read_csv(PP_PATH, low_memory=False)
+pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
+pp['n_phospho'] = pp['PP.PIMID'].str.count(r'\[Phospho \(STY\)\]')
+pp_phos = pp[pp['is_phospho']].copy()
+pp_quant_cols = [c for c in pp.columns if 'Label-Free Quant' in c]
+gp = pd.read_csv(GP_PATH, sep='\t', low_memory=False)
+gp['has_glyco']   = gp['Assigned Modifications'].str.contains(r'N\(', na=False)
+gp['has_phospho'] = gp['Assigned Modifications'].str.contains(r'79\.9663', na=False)
+gp_phos_only = gp[gp['has_phospho'] & ~gp['has_glyco']].copy()
+# ============================================================
+# Panel A: Mono-phos vs multi-phos CV (GFC AP and C8 ACN)
+# ============================================================
+print("\nPanel A: Mono vs multi-phos CV")
+def cv_per_pimid(cols, min_reps=3):
+    df = pp_phos[['PP.PIMID', 'n_phospho'] + cols].copy()
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    g = df.groupby(['PP.PIMID', 'n_phospho'], as_index=False)[cols].max()
+    valid = g[cols].where(g[cols] > 0)
+    n_valid = valid.notna().sum(axis=1)
+    keep_mask = n_valid >= min_reps
+    g = g[keep_mask]; valid = valid[keep_mask]
+    means = valid.mean(axis=1, skipna=True); stds = valid.std(axis=1, skipna=True)
+    g = g.copy(); g['cv'] = (stds / means * 100).values
+    return g.dropna(subset=['cv'])
+gfc_df = cv_per_pimid(cols_for(pp_quant_cols, 'GFC-Sep-PP-Aq', drop_r1=True))
+c8_df  = cv_per_pimid(cols_for(pp_quant_cols, 'C8-Sep-PP-ACN'))
+groups = {'GF-C\nAP': gfc_df, 'C8\nACN': c8_df}
+color_mono, color_multi = '#87CEFA', '#4682B4'
+violin_w = 0.32
+xlocs = np.arange(len(groups))
+mono_x  = xlocs - 0.20
+multi_x = xlocs + 0.20
+mono_data  = [groups[k].loc[groups[k]['n_phospho'] == 1, 'cv'].values for k in groups]
+multi_data = [groups[k].loc[groups[k]['n_phospho'] >= 2, 'cv'].values for k in groups]
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts1 = ax.violinplot(mono_data, positions=mono_x, widths=violin_w,
+                        showmeans=False, showmedians=False, showextrema=False)
+for pc in parts1['bodies']:
+    pc.set_facecolor(color_mono); pc.set_edgecolor('black'); pc.set_linewidth(1.0); pc.set_alpha(0.85)
+parts2 = ax.violinplot(multi_data, positions=multi_x, widths=violin_w,
+                        showmeans=False, showmedians=False, showextrema=False)
+for pc in parts2['bodies']:
+    pc.set_facecolor(color_multi); pc.set_edgecolor('black'); pc.set_linewidth(1.0); pc.set_alpha(0.85)
+ax.boxplot(mono_data, positions=mono_x, widths=0.10, patch_artist=False,
+           showfliers=False, medianprops=dict(color='red', linewidth=2),
+           whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+ax.boxplot(multi_data, positions=multi_x, widths=0.10, patch_artist=False,
+           showfliers=False, medianprops=dict(color='red', linewidth=2),
+           whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+for i, (m_d, mu_d) in enumerate(zip(mono_data, multi_data)):
+    ax.text(mono_x[i], -3, f'{np.median(m_d):.1f}%', ha='center', fontsize=FS_N, color='gray')
+    ax.text(multi_x[i], -3, f'{np.median(mu_d):.1f}%', ha='center', fontsize=FS_N, color='gray')
+ax.legend(handles=[
+    Patch(facecolor=color_mono,  edgecolor='black', label='Mono-phos'),
+    Patch(facecolor=color_multi, edgecolor='black', label='Multi-phos'),
+], loc='upper right', fontsize=FS_LEGEND, framealpha=0.95, edgecolor='black')
+ax.set_xticks(xlocs); ax.set_xticklabels(list(groups.keys()), fontsize=FS_TICK)
+ax.set_ylabel('Phosphopeptide CV (%)', fontsize=FS_LABEL)
+ax.set_ylim(-5, 80); ax.set_yticks([0, 20, 40, 60, 80])
+style_ax(ax); plt.tight_layout()
+panel_a = f"{PANELDIR}/panel_a.png"; plt.savefig(panel_a, **SAVE); plt.close()
+# ============================================================
+# Panel B: Leak hypothesis test — leaked vs retained in GFC AP
+# ============================================================
+print("Panel B: Leaked vs retained CV (GFC AP)")
+gp_int_cols = [c for c in gp.columns if c.endswith(' Intensity') and 'MaxLFQ' not in c]
+gfc_gp_cols = [c for c in gp_int_cols if c.startswith('GFC_GP')]
+gfc_ap_cols = cols_for(pp_quant_cols, 'GFC-Sep-PP-Aq', drop_r1=True)
+gfc_gp_phos = gp_phos_only[gfc_gp_cols].copy()
+for c in gfc_gp_cols:
+    gfc_gp_phos[c] = pd.to_numeric(gfc_gp_phos[c], errors='coerce')
+n_gp_reps = (gfc_gp_phos > 0).sum(axis=1)
+leaked_seqs = set(gp_phos_only.loc[n_gp_reps >= 2, 'Peptide Sequence'].tolist())
+gfc_ap_df = pp_phos[['PP.PIMID', 'PEP.StrippedSequence'] + gfc_ap_cols].copy()
+for c in gfc_ap_cols:
+    gfc_ap_df[c] = pd.to_numeric(gfc_ap_df[c], errors='coerce')
+def cv_for_subset(df, value_cols, min_reps=3):
+    g = df.groupby('PP.PIMID')[value_cols].max()
+    valid = g.where(g > 0)
+    keep = valid[valid.notna().sum(axis=1) >= min_reps]
+    means = keep.mean(axis=1, skipna=True); stds = keep.std(axis=1, skipna=True)
+    return (stds / means * 100).dropna().values
+cv_leaked   = cv_for_subset(gfc_ap_df[gfc_ap_df['PEP.StrippedSequence'].isin(leaked_seqs)],   gfc_ap_cols)
+cv_retained = cv_for_subset(gfc_ap_df[~gfc_ap_df['PEP.StrippedSequence'].isin(leaked_seqs)],  gfc_ap_cols)
+cv_data = {'AP only': cv_retained, 'AP and GP': cv_leaked}
+colors_b = ['#78A5C8', '#E8916D']
+xlocs = np.arange(2)
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts = ax.violinplot([cv_data[c] for c in cv_data], positions=xlocs,
+                       showmedians=False, showextrema=False)
+for pc, color in zip(parts['bodies'], colors_b):
+    pc.set_facecolor(color); pc.set_alpha(0.85); pc.set_edgecolor('black'); pc.set_linewidth(1.0)
+ax.boxplot([cv_data[c] for c in cv_data], positions=xlocs, widths=0.18,
+           patch_artist=False, showfliers=False,
+           medianprops=dict(color='red', linewidth=2),
+           whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+for i, c in enumerate(cv_data):
+    ax.text(i, -3, f'{np.median(cv_data[c]):.1f}%', ha='center', va='center',
+            fontsize=FS_N, color='gray')
+ax.set_xticks(xlocs); ax.set_xticklabels(list(cv_data.keys()), fontsize=FS_TICK)
+ax.set_ylabel('Phosphopeptide CV (%)', fontsize=FS_LABEL)
+ax.set_ylim(-5, 80); ax.set_yticks([0, 20, 40, 60, 80])
+style_ax(ax); plt.tight_layout()
+panel_b = f"{PANELDIR}/panel_b.png"; plt.savefig(panel_b, **SAVE); plt.close()
+# ============================================================
+# Assemble (1x2) — transparent
+# ============================================================
+print("\nAssembling SuppFig 8...")
+fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+fig.patch.set_alpha(0.0)
+for ax, (path, letter) in zip(axes, [(panel_a, 'A'), (panel_b, 'B')]):
+    img = mpimg.imread(path)
+    ax.imshow(img); ax.axis('off')
+    ax.text(-0.08, 1.05, letter, transform=ax.transAxes,
+            fontsize=18, fontweight='bold', ha='left', va='bottom')
+plt.tight_layout(pad=0.5)
+out_path = f"{OUTDIR}/SuppFig8_GFC_quant_mechanism_transparent.png"
+plt.savefig(out_path, dpi=DPI_ASSEMBLED, bbox_inches='tight', transparent=True)
+plt.close()
+print(f"Saved {out_path}")
