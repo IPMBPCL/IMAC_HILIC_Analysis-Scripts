@@ -1,0 +1,20 @@
+├── data/                       # Place raw input CSV/TSV/Excel reports here
+│   ├── 1150375-1150394_HILIC_beads-PP_A227_20260410_Peptide_Precursor_Report.csv
+│   ├── Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv
+│   ├── Exp3-GP_combined_modified_peptide.tsv
+│   └── 1150482-1150497_Exp3-GP_Summary.xlsx
+├── outputs/                    # Generated figure panels and assembled final images
+├── scripts/                    # Python analysis and plotting scripts
+│   ├── fig2.py
+│   ├── fig3.py
+│   ├── fig4.py
+│   ├── fig5.py
+│   ├── suppfig2.py
+│   ├── suppfig4.py
+│   ├── suppfig5.py
+│   ├── suppfig6.py
+│   ├── suppfig7.py
+│   ├── suppfig8.py
+│   └── suppfig9.py
+├── requirements.txt            # Required Python packages
+└── README.md                   # Project documentation
