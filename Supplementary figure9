@@ -1,0 +1,176 @@
+"""
+Supplementary Figure 9: GF-C HILIC resin titration (1 mg vs 2 mg) vs TIMAHAC.
+
+Self-contained. 2 panels in 1x2 layout.
+
+Data:
+    1150482-1150497_Exp3-GP_Summary.xlsx              (GP summary; includes GFC 2mg samples)
+    Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv   (PP fraction; for GFC 1mg and TIM)
+
+Panels:
+    A: N-glyco IDs across GFC 1mg / GFC 2mg / TIMAHAC
+    B: Phospho IDs (mono/multi stacked)
+
+Note:
+    GFC 2mg phospho counts (Panel B) are hardcoded from a manual Spectronaut
+    search of samples 1150474-1150477. They are not yet integrated into the
+    main prec.csv at the time of this analysis. When the search is integrated,
+    this hardcode can be replaced with a per_rep_counts() call.
+"""
+import os
+import re
+import warnings
+
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+
+
+PP_PATH = "/mnt/user-data/uploads/Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv"
+GP_SUMMARY_PATH = "/mnt/user-data/uploads/1150482-1150497_Exp3-GP_Summary.xlsx"
+OUTDIR = "/mnt/user-data/outputs"
+os.makedirs(OUTDIR, exist_ok=True)
+
+DPI_PANEL = 600; DPI_ASSEMBLED = 300
+FIGSIZE = (3, 3)
+FS_LABEL, FS_TICK, FS_LEGEND = 10, 9, 6
+
+LABELS = ['GF-C\n(1 mg)', 'GF-C\n(2 mg)', 'TIMAHAC']
+COLORS = ['#78A5C8', '#8CB9B9', '#C8D2E6']
+COLOR_MONO, COLOR_MULTI = '#87CEFA', '#4682B4'
+
+# Manual Spectronaut counts for GFC 2mg samples (samples 1150474-1150477).
+# Replace with a per_rep_counts() call once integrated into the main prec.csv.
+GFC_2MG_MONO  = [4191, 4495, 3738, 4045]
+GFC_2MG_MULTI = [2886, 3062, 2595, 2613]
+
+
+def detected_mask(s):
+    s = pd.to_numeric(s, errors='coerce')
+    return s.notna() & (s > 0)
+
+
+def style_ax(ax):
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5); spine.set_color('black')
+    ax.tick_params(width=1.5, length=4, labelsize=FS_TICK)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.set_axisbelow(True)
+
+
+def cols_for(quant_cols, pat, drop_r1=False):
+    cols = [c for c in quant_cols if pat in c]
+    if drop_r1: cols = [c for c in cols if '-R1_' not in c]
+    return cols
+
+
+# ============================================================
+# Panel A: N-glyco IDs from GP summary
+# ============================================================
+print("Panel A: N-glyco IDs (GFC 1mg / 2mg / TIM)")
+df_gp = pd.read_excel(GP_SUMMARY_PATH, sheet_name='Summary', header=3).iloc[:, 2:]
+df_gp.columns = ['Sample_No','Sample_Name','Cond','Total_ID','Glyco','Phos','OtherMod',
+                 'GlycoSpec','PhosSpec','Total_Int','Glyco_Int','Phos_Int',
+                 'GlycoIntSpec','PhosIntSpec','SW']
+df_gp['Group'] = df_gp['Sample_Name'].str.rsplit('_', n=1).str[0]
+
+groups = ['GFC_GP', 'GFC2mg_GP', 'TIM_GP']
+means_a, sds_a = [], []
+for g in groups:
+    sub = df_gp[df_gp['Group'] == g]['Glyco']
+    means_a.append(sub.mean()); sds_a.append(sub.std(ddof=1))
+
+x = np.arange(3); width = 0.55
+fig, ax = plt.subplots(figsize=FIGSIZE)
+ax.bar(x, means_a, width, color=COLORS, edgecolor='black', linewidth=1.0)
+ax.errorbar(x, means_a, yerr=sds_a, fmt='none', ecolor='black',
+            capsize=3, capthick=1.0, linewidth=1.0)
+for i, m in enumerate(means_a):
+    ax.text(i, m * 0.5, f'{m:.0f}', ha='center', va='center',
+            fontsize=10, fontweight='bold', color='black')
+ax.set_xticks(x); ax.set_xticklabels(LABELS, fontsize=FS_TICK)
+ax.set_ylabel('Number of N-glycopeptides', fontsize=FS_LABEL)
+ax.set_ylim(0, 5000); ax.set_yticks([0, 1000, 2000, 3000, 4000, 5000])
+style_ax(ax); plt.tight_layout()
+panel_a = f"{OUTDIR}/suppfig9_panel_a_glyco_titration.png"
+plt.savefig(panel_a, dpi=DPI_PANEL); plt.close()
+
+
+# ============================================================
+# Panel B: Phospho IDs (mono/multi stacked)
+# ============================================================
+print("Panel B: Phospho IDs (mono/multi)")
+
+# Load PP fraction for GFC 1mg and TIM (recompute per-rep)
+pp = pd.read_csv(PP_PATH, low_memory=False)
+pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
+pp['n_phospho'] = pp['PP.PIMID'].str.count(r'\[Phospho \(STY\)\]')
+pp_phos = pp[pp['is_phospho']].copy()
+pp_quant_cols = [c for c in pp.columns if 'Label-Free Quant' in c]
+
+def per_rep_counts(cols):
+    out = []
+    for c in cols:
+        det = detected_mask(pp_phos[c])
+        sub = pp_phos[det].drop_duplicates('PP.PIMID')
+        m = (sub['n_phospho'] == 1).sum()
+        mu = (sub['n_phospho'] > 1).sum()
+        out.append({'mono': m, 'multi': mu, 'total': m + mu})
+    return pd.DataFrame(out)
+
+gfc_1mg = per_rep_counts(cols_for(pp_quant_cols, 'GFC-Sep-PP-Aq', drop_r1=True))
+tim     = per_rep_counts(cols_for(pp_quant_cols, 'TIM-PP'))
+
+gfc_2mg = pd.DataFrame({'mono': GFC_2MG_MONO, 'multi': GFC_2MG_MULTI})
+gfc_2mg['total'] = gfc_2mg['mono'] + gfc_2mg['multi']
+
+dfs = [gfc_1mg, gfc_2mg, tim]
+mono_means  = [d['mono'].mean()  for d in dfs]
+multi_means = [d['multi'].mean() for d in dfs]
+total_means = [d['total'].mean() for d in dfs]
+total_sds   = [d['total'].std(ddof=1) for d in dfs]
+
+fig, ax = plt.subplots(figsize=FIGSIZE)
+b_multi = ax.bar(x, multi_means, width, color=COLOR_MULTI, edgecolor='black', linewidth=1.0)
+b_mono  = ax.bar(x, mono_means, width, bottom=multi_means, color=COLOR_MONO,
+                 edgecolor='black', linewidth=1.0)
+ax.errorbar(x, total_means, yerr=total_sds, fmt='none', ecolor='black',
+            capsize=3, capthick=1.0, linewidth=1.0)
+for i in range(3):
+    if multi_means[i] > 1500:
+        ax.text(i, multi_means[i] / 2, f'{multi_means[i]:.0f}',
+                ha='center', va='center', fontsize=7, fontweight='bold', color='white')
+    if mono_means[i] > 1500:
+        ax.text(i, multi_means[i] + mono_means[i] / 2, f'{mono_means[i]:.0f}',
+                ha='center', va='center', fontsize=7, fontweight='bold', color='black')
+ax.set_xticks(x); ax.set_xticklabels(LABELS, fontsize=FS_TICK)
+ax.set_ylabel('Number of phosphopeptides', fontsize=FS_LABEL)
+ax.set_ylim(0, 11000)
+ax.legend([b_mono, b_multi], ['Mono-phosphorylated', 'Multiply phosphorylated'],
+          loc='upper left', fontsize=FS_LEGEND, framealpha=0.95, edgecolor='black')
+style_ax(ax); plt.tight_layout()
+panel_b = f"{OUTDIR}/suppfig9_panel_b_phos_titration.png"
+plt.savefig(panel_b, dpi=DPI_PANEL); plt.close()
+
+
+# ============================================================
+# Assemble (1x2)
+# ============================================================
+print("\nAssembling SuppFig 9...")
+fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+for ax, (path, letter) in zip(axes, [(panel_a, 'A'), (panel_b, 'B')]):
+    img = mpimg.imread(path)
+    ax.imshow(img); ax.axis('off')
+    ax.text(-0.08, 1.05, letter, transform=ax.transAxes,
+            fontsize=18, fontweight='bold', ha='left', va='bottom')
+plt.tight_layout(pad=0.5)
+out_path = f"{OUTDIR}/SuppFig9_GFC_titration.png"
+plt.savefig(out_path, dpi=DPI_ASSEMBLED, bbox_inches='tight')
+plt.close()
+print(f"Saved {out_path}")
