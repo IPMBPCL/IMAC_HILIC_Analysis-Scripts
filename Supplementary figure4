@@ -1,0 +1,227 @@
+"""
+Supplementary Figure 4: HILIC loading optimization (Phase 2) — precision details.
+TRANSPARENT background, 600 DPI. 4 panels in 2x2 layout.
+Data (same as Figure 4):
+    1150375-1150394_HILIC_beads-PP_A227_20260410_Peptide_Precursor_Report.csv
+    1150410-1150429_HILIC_beads_test_GP_A227_combined_modified_peptide.tsv
+Panels:
+    A: N-glycopeptide intensity (log2) boxplot      (y 11-20)
+    B: N-glycopeptide CV violin                     (bottom label = median CV %)
+    C: Phosphopeptide intensity (log2) boxplot      (y ticks 6/8/10/12)
+    D: Phosphopeptide CV grouped bar (Total / CV<20% / CV<10%)  (y 0-7000)
+"""
+import os
+import re
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import matplotlib.patches as mpatches
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
+warnings.filterwarnings('ignore')
+PP_PATH = "/mnt/user-data/uploads/1150375-1150394_HILIC_beads-PP_A227_20260410_Peptide_Precursor_Report.csv"
+GP_PATH = "/mnt/user-data/uploads/1150410-1150429_HILIC_beads_test_GP_A227_combined_modified_peptide.tsv"
+OUTDIR = "/mnt/user-data/outputs"
+PANELDIR = "/home/claude/sf4_panels"
+os.makedirs(OUTDIR, exist_ok=True)
+os.makedirs(PANELDIR, exist_ok=True)
+DPI_PANEL = 600; DPI_ASSEMBLED = 600
+TRANSPARENT = True
+FIGSIZE = (3, 3)
+FS_LABEL, FS_TICK, FS_LEGEND, FS_VALUE, FS_N = 10, 9, 6, 8, 6
+COLORS = ['#AADCFA', '#78A5C8', '#8CB9B9', '#C8D2E6']
+SAVE = dict(dpi=DPI_PANEL, transparent=TRANSPARENT, bbox_inches='tight')
+CONDITIONS = {
+    '10 mg': {'pp_pat': '_10-10-PP-', 'gp_pre': '10_10_GP'},
+    '5 mg':  {'pp_pat': '_10-5-PP-',  'gp_pre': '10_5_GP'},
+    '2 mg':  {'pp_pat': '_10-2-PP-',  'gp_pre': '10_2_GP'},
+    '1 mg':  {'pp_pat': '_10-1-PP-',  'gp_pre': '10_1_GP'},
+}
+COND_LABELS = ['10', '5', '2', '1']
+def detected_mask(s):
+    s = pd.to_numeric(s, errors='coerce')
+    return s.notna() & (s > 0)
+def style_ax(ax):
+    for spine in ax.spines.values():
+        spine.set_linewidth(1.5); spine.set_color('black')
+    ax.tick_params(width=1.5, length=4, labelsize=FS_TICK)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4, color='gray')
+    ax.set_axisbelow(True)
+    ax.set_facecolor('none')
+def cv_distribution(df, key_col, cond_cols, min_reps=3):
+    sub = df[[key_col] + list(cond_cols)].copy()
+    for c in cond_cols:
+        sub[c] = pd.to_numeric(sub[c], errors='coerce')
+    g = sub.groupby(key_col)[list(cond_cols)].max()
+    valid = g.where(g > 0)
+    keep = valid[valid.notna().sum(axis=1) >= min_reps]
+    means = keep.mean(axis=1, skipna=True); stds = keep.std(axis=1, skipna=True)
+    return (stds / means * 100).dropna().values
+# ============================================================
+# Load
+# ============================================================
+print("Loading data...")
+pp = pd.read_csv(PP_PATH, low_memory=False)
+pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
+pp_phos = pp[pp['is_phospho']].copy()
+pp_quant_cols = [c for c in pp.columns if 'Label-Free Quant' in c]
+gp = pd.read_csv(GP_PATH, sep='\t', low_memory=False)
+gp['has_glyco'] = gp['Assigned Modifications'].str.contains(r'N\(', na=False)
+gp_glyco = gp[gp['has_glyco']].copy()
+def parse_glycan_mass(mods):
+    if pd.isna(mods): return None
+    m = re.findall(r'N\(([\d.]+)\)', str(mods))
+    return float(m[0]) if m else None
+gp_glyco['glycan_mass'] = gp_glyco['Assigned Modifications'].apply(parse_glycan_mass)
+gp_glyco['glyco_key'] = (gp_glyco['Peptide Sequence'].astype(str) + '|'
+                          + gp_glyco['glycan_mass'].round(2).astype(str))
+gp_int_cols = [c for c in gp.columns if c.endswith(' Intensity') and 'MaxLFQ' not in c and 'Spectral' not in c]
+x = np.arange(len(CONDITIONS)); width = 0.6
+# ============================================================
+# Panel A: Glyco intensity boxplot   (y 11-20)
+# ============================================================
+print("\nPanel A: N-glyco intensity boxplot")
+glyco_log2 = {c: [] for c in CONDITIONS}
+glyco_unique = {c: set() for c in CONDITIONS}
+for cname, info in CONDITIONS.items():
+    icols = [c for c in gp_int_cols if c.startswith(info['gp_pre'])]
+    for col in icols:
+        det = detected_mask(gp_glyco[col])
+        vals = pd.to_numeric(gp_glyco[col], errors='coerce')
+        glyco_log2[cname].extend(np.log2(vals[det].values))
+        glyco_unique[cname].update(gp_glyco.loc[det, 'glyco_key'])
+fig, ax = plt.subplots(figsize=FIGSIZE)
+bp = ax.boxplot([glyco_log2[c] for c in CONDITIONS], positions=x, widths=0.55,
+                patch_artist=True, showfliers=False, showcaps=False,
+                medianprops=dict(color='red', linewidth=2),
+                whiskerprops=dict(linewidth=1.0),
+                boxprops=dict(linewidth=1.0))
+for patch, color in zip(bp['boxes'], COLORS):
+    patch.set_facecolor(color); patch.set_alpha(0.9)
+y_min = 11
+for i, c in enumerate(CONDITIONS):
+    med = np.median(glyco_log2[c]); n = len(glyco_unique[c])
+    ax.text(i, med + 0.15, f'{med:.1f}', ha='center', va='bottom',
+            fontsize=FS_VALUE, color='black')
+    ax.text(i, y_min + 0.3, f'n={n}', ha='center', va='center',
+            fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('N-glycopeptide intensity (log$_2$)', fontsize=FS_LABEL)
+ax.set_ylim(11, 20)
+style_ax(ax); plt.tight_layout()
+panel_a = f"{PANELDIR}/panel_a.png"; plt.savefig(panel_a, **SAVE); plt.close()
+# ============================================================
+# Panel B: Glyco CV violin   (bottom label = median CV %)
+# ============================================================
+print("Panel B: N-glyco CV violin")
+cv_glyco = {}
+for cname, info in CONDITIONS.items():
+    icols = [c for c in gp_int_cols if c.startswith(info['gp_pre'])]
+    cv_glyco[cname] = cv_distribution(gp_glyco, 'glyco_key', icols, min_reps=3)
+fig, ax = plt.subplots(figsize=FIGSIZE)
+parts = ax.violinplot([cv_glyco[c] for c in CONDITIONS], positions=x,
+                       showmedians=False, showextrema=False)
+for pc, color in zip(parts['bodies'], COLORS):
+    pc.set_facecolor(color); pc.set_alpha(0.85); pc.set_edgecolor('black'); pc.set_linewidth(1.0)
+ax.boxplot([cv_glyco[c] for c in CONDITIONS], positions=x, widths=0.18,
+           patch_artist=False, showfliers=False,
+           medianprops=dict(color='red', linewidth=2),
+           whiskerprops=dict(linewidth=1.0), capprops=dict(linewidth=1.0))
+for i, c in enumerate(CONDITIONS):
+    med = np.median(cv_glyco[c])
+    ax.text(i, -3, f'{med:.1f}%', ha='center', va='center', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('N-glycopeptide CV (%)', fontsize=FS_LABEL)
+ax.set_ylim(-5, 80); ax.set_yticks([0, 20, 40, 60, 80])
+style_ax(ax); plt.tight_layout()
+panel_b = f"{PANELDIR}/panel_b.png"; plt.savefig(panel_b, **SAVE); plt.close()
+# ============================================================
+# Panel C: Phospho intensity boxplot   (y ticks 6/8/10/12)
+# ============================================================
+print("Panel C: Phospho intensity boxplot")
+phos_log2 = {c: [] for c in CONDITIONS}
+phos_unique = {c: set() for c in CONDITIONS}
+for cname, info in CONDITIONS.items():
+    rep_cols = [c for c in pp_quant_cols if info['pp_pat'] in c]
+    for col in rep_cols:
+        det = detected_mask(pp_phos[col])
+        vals = pd.to_numeric(pp_phos[col], errors='coerce')
+        sub = pp_phos[['PP.PIMID']].copy()
+        sub['_v'] = vals
+        sub = sub[det]
+        pimid_max = sub.groupby('PP.PIMID')['_v'].max()
+        phos_log2[cname].extend(np.log2(pimid_max.values))
+        phos_unique[cname].update(pimid_max.index)
+fig, ax = plt.subplots(figsize=FIGSIZE)
+bp = ax.boxplot([phos_log2[c] for c in CONDITIONS], positions=x, widths=0.55,
+                patch_artist=True, showfliers=False, showcaps=False,
+                medianprops=dict(color='red', linewidth=2),
+                whiskerprops=dict(linewidth=1.0),
+                boxprops=dict(linewidth=1.0))
+for patch, color in zip(bp['boxes'], COLORS):
+    patch.set_facecolor(color); patch.set_alpha(0.9)
+y_min = 5.5
+for i, c in enumerate(CONDITIONS):
+    med = np.median(phos_log2[c]); n = len(phos_unique[c])
+    ax.text(i, med + 0.12, f'{med:.1f}',
+            ha='center', va='bottom', fontsize=FS_VALUE, color='black')
+    ax.text(i, y_min + 0.15, f'n={n}',
+            ha='center', va='bottom', fontsize=FS_N, color='gray')
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Phosphopeptide intensity (log$_2$)', fontsize=FS_LABEL)
+ax.set_ylim(y_min, 12); ax.set_yticks([6, 8, 10, 12])
+style_ax(ax); plt.tight_layout()
+panel_c = f"{PANELDIR}/panel_c.png"; plt.savefig(panel_c, **SAVE); plt.close()
+# ============================================================
+# Panel D: Phospho CV grouped bar   (y 0-7000, ticks 1400..7000)
+# ============================================================
+print("Panel D: Phospho CV grouped bar")
+totals_d = []; n_cv20 = []; n_cv10 = []
+for cname, info in CONDITIONS.items():
+    rep_cols = [c for c in pp_quant_cols if info['pp_pat'] in c]
+    cvs = cv_distribution(pp_phos, 'PP.PIMID', rep_cols, min_reps=3)
+    totals_d.append(len(cvs))
+    n_cv20.append(int((cvs < 20).sum()))
+    n_cv10.append(int((cvs < 10).sum()))
+bw = 0.27
+fig, ax = plt.subplots(figsize=FIGSIZE)
+for i in range(len(CONDITIONS)):
+    base = COLORS[i]
+    ax.bar(i - bw, totals_d[i], bw, color=base, edgecolor='black', linewidth=1.0, alpha=0.4)
+    ax.bar(i,      n_cv20[i],   bw, color=base, edgecolor='black', linewidth=1.0, alpha=0.7)
+    ax.bar(i + bw, n_cv10[i],   bw, color=base, edgecolor='black', linewidth=1.0, alpha=1.0)
+ax.legend(handles=[
+    mpatches.Patch(facecolor='gray', alpha=0.4, edgecolor='black', label='Total'),
+    mpatches.Patch(facecolor='gray', alpha=0.7, edgecolor='black', label='CV < 20%'),
+    mpatches.Patch(facecolor='gray', alpha=1.0, edgecolor='black', label='CV < 10%'),
+], loc='upper left', fontsize=FS_LEGEND, framealpha=0.95)
+ax.set_xticks(x); ax.set_xticklabels(COND_LABELS, fontsize=FS_TICK)
+ax.set_xlabel('HILIC resin amount (mg)', fontsize=FS_LABEL)
+ax.set_ylabel('Number of phosphopeptides', fontsize=FS_LABEL)
+ax.set_ylim(0, 7000); ax.set_yticks([1400, 2800, 4200, 5600, 7000])
+style_ax(ax); plt.tight_layout()
+panel_d = f"{PANELDIR}/panel_d.png"; plt.savefig(panel_d, **SAVE); plt.close()
+# ============================================================
+# Assemble (2x2) — transparent
+# ============================================================
+print("\nAssembling SuppFig 4...")
+fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+fig.patch.set_alpha(0.0)
+axes = axes.flatten()
+for ax, (path, letter) in zip(axes, [(panel_a, 'A'), (panel_b, 'B'),
+                                      (panel_c, 'C'), (panel_d, 'D')]):
+    img = mpimg.imread(path)
+    ax.imshow(img); ax.axis('off')
+    ax.text(-0.08, 1.05, letter, transform=ax.transAxes,
+            fontsize=18, fontweight='bold', ha='left', va='bottom')
+plt.tight_layout(pad=0.5)
+out_path = f"{OUTDIR}/SuppFig4_precision_transparent.png"
+plt.savefig(out_path, dpi=DPI_ASSEMBLED, bbox_inches='tight', transparent=True)
+plt.close()
+print(f"Saved {out_path}")
