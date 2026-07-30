@@ -4,18 +4,19 @@ Supplementary Figure 9: GF-C HILIC resin titration (1 mg vs 2 mg) vs TIMAHAC.
 Self-contained. 2 panels in 1x2 layout.
 
 Data:
-    1150482-1150497_Exp3-GP_Summary.xlsx              (GP summary; includes GFC 2mg samples)
-    Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv   (PP fraction; for GFC 1mg and TIM)
+    1150482-1150497_Exp3-GP_Summary.xlsx                          (GP summary; includes GFC 2mg samples)
+    Exp3-PP_C8-GFC-TIM-GFC2mg_20260505_Peptide_Precursor_Report.csv
+                                                                  (PP fraction; GFC 1mg, GFC 2mg and TIM)
 
 Panels:
     A: N-glyco IDs across GFC 1mg / GFC 2mg / TIMAHAC
     B: Phospho IDs (mono/multi stacked)
 
 Note:
-    GFC 2mg phospho counts (Panel B) are hardcoded from a manual Spectronaut
-    search of samples 1150474-1150477. They are not yet integrated into the
-    main prec.csv at the time of this analysis. When the search is integrated,
-    this hardcode can be replaced with a per_rep_counts() call.
+    GFC 2mg phospho counts (Panel B) previously came from a separate manual
+    Spectronaut search and were hardcoded. Samples 1150474-1150477 are now part
+    of the 20260505 combined search, so all three groups are computed from the
+    same precursor report with per_rep_counts().
 """
 import os
 import re
@@ -31,23 +32,18 @@ matplotlib.rcParams['font.family'] = 'DejaVu Sans'
 warnings.filterwarnings('ignore')
 
 
-PP_PATH = "/mnt/user-data/uploads/Exp3-PP_C8-GFC-TIM_Peptide_Precursor_Report.csv"
+PP_PATH = "/mnt/user-data/uploads/Exp3-PP_C8-GFC-TIM-GFC2mg_20260505_Peptide_Precursor_Report.csv"
 GP_SUMMARY_PATH = "/mnt/user-data/uploads/1150482-1150497_Exp3-GP_Summary.xlsx"
 OUTDIR = "/mnt/user-data/outputs"
 os.makedirs(OUTDIR, exist_ok=True)
 
-DPI_PANEL = 600; DPI_ASSEMBLED = 300
+DPI_PANEL = 600; DPI_ASSEMBLED = 600
 FIGSIZE = (3, 3)
 FS_LABEL, FS_TICK, FS_LEGEND = 10, 9, 6
 
 LABELS = ['GF-C\n(1 mg)', 'GF-C\n(2 mg)', 'TIMAHAC']
 COLORS = ['#78A5C8', '#8CB9B9', '#C8D2E6']
 COLOR_MONO, COLOR_MULTI = '#87CEFA', '#4682B4'
-
-# Manual Spectronaut counts for GFC 2mg samples (samples 1150474-1150477).
-# Replace with a per_rep_counts() call once integrated into the main prec.csv.
-GFC_2MG_MONO  = [4191, 4495, 3738, 4045]
-GFC_2MG_MULTI = [2886, 3062, 2595, 2613]
 
 
 def detected_mask(s):
@@ -107,7 +103,7 @@ plt.savefig(panel_a, dpi=DPI_PANEL); plt.close()
 # ============================================================
 print("Panel B: Phospho IDs (mono/multi)")
 
-# Load PP fraction for GFC 1mg and TIM (recompute per-rep)
+# Load PP fraction for GFC 1mg, GFC 2mg and TIM (recompute per-rep)
 pp = pd.read_csv(PP_PATH, low_memory=False)
 pp['is_phospho'] = pp['PP.PIMID'].str.contains(r'\[Phospho', na=False, regex=True)
 pp['n_phospho'] = pp['PP.PIMID'].str.count(r'\[Phospho \(STY\)\]')
@@ -125,10 +121,8 @@ def per_rep_counts(cols):
     return pd.DataFrame(out)
 
 gfc_1mg = per_rep_counts(cols_for(pp_quant_cols, 'GFC-Sep-PP-Aq', drop_r1=True))
+gfc_2mg = per_rep_counts(cols_for(pp_quant_cols, 'GFC-2mg'))
 tim     = per_rep_counts(cols_for(pp_quant_cols, 'TIM-PP'))
-
-gfc_2mg = pd.DataFrame({'mono': GFC_2MG_MONO, 'multi': GFC_2MG_MULTI})
-gfc_2mg['total'] = gfc_2mg['mono'] + gfc_2mg['multi']
 
 dfs = [gfc_1mg, gfc_2mg, tim]
 mono_means  = [d['mono'].mean()  for d in dfs]
